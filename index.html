@@ -274,7 +274,7 @@ const CFG = {
   CROSS_MIN: 0.90,        // cross-site must be near-exact
   CROSS_AGE: 20,          // cross-site only for salvaging ageing > 20 days
   TOPK: 6,                // candidates kept per orphan
-  MAX_SCORE_CANDS: 400,   // candidates scored per orphan per scope
+  MAX_SCORE_CANDS: 150,   // candidates scored per orphan per scope
   SITE_ALIASES: {         // orphan site name → salvaging DC LIABILITY name (lower-case)
     'blr superstore': 'bangalore superstore dc'
   },
@@ -433,7 +433,7 @@ function num(v) { const n = parseFloat(v); return isFinite(n) ? n : null; }
 /* ============================================================
    MAIN
    ============================================================ */
-function runMatch(orph, salv, combo, progress) {
+async function runMatch(orph, salv, combo, progress) {
   progress = progress || (() => {});
   const oc = resolveCols(Object.keys(orph[0] || {}), ORPH_SPEC);
   const sc = resolveCols(Object.keys(salv[0] || {}), SALV_SPEC);
@@ -491,7 +491,10 @@ function runMatch(orph, salv, combo, progress) {
   const df = new Map();
   for (const e of pool) for (const t of e.tset) df.set(t, (df.get(t) || 0) + 1);
   const N = pool.length;
-  const idf = t => Math.log(1 + N / (1 + (df.get(t) || 0)));
+  const idfMap = new Map(); for (const [t, n] of df) idfMap.set(t, Math.log(1 + N / (1 + n)));
+  const IDF0 = Math.log(1 + N);
+  const idf = t => { const v = idfMap.get(t); return v === undefined ? IDF0 : v; };
+  const accW = new Float64Array(N), touched = new Int32Array(N); let nTouched = 0;
   const siteIdx = new Map(); const crossIdx = new Map();
   for (const e of pool) {
     for (const t of e.tset) {
@@ -528,10 +531,19 @@ function runMatch(orph, salv, combo, progress) {
       idx, r, site: siteKey(r[oc.site]), siteRaw: r[oc.site], age: num(r[oc.age]),
       brand, brandSrc, btoks, weakBrand, bcompact: brand.replace(/\s/g, ''), descRaw, dt, specific,
       q: quantities(descRaw), allow,
+      keys: [...new Set([...btoks, ...dt])],
       models: (String(descRaw).match(/(?<![\d.])\d{2,4}(?![\d.]|\s*(?:%|ml|l\b|ltr|g\b|gm|gms|kg|mg|pcs|pc\b|x\b|cm|mm|inch|w\b|mah|gb|tb))/gi) || []), cat: r[oc.category],
       acc: dt.some(x => ACC_WORDS.has(x)), prim: dt.some(x => PRIMARY_WORDS.has(x))
     };
   });
+
+  for (const e of pool) { let ws = 0; for (const t of e.tset) ws += idf(t); e.wsum = ws; }
+  for (const o of O) {
+    o.dtGen = o.dt.map(t => GENERIC.has(t)); o.dtw = o.dt.map((t, j) => idf(t) * (o.dtGen[j] ? 0.35 : 1));
+    o.tot = o.dtw.reduce((x, y) => x + y, 0);
+    o.dtU = [...new Set(o.dt)].filter(t => !o.btoks.includes(t)); o.dtUw = o.dtU.map(idf); o.btw = o.btoks.map(idf);
+  }
+  for (const o of O) o.modelRe = o.models.length ? new RegExp('(?:^|\\D)(?:' + o.models.join('|') + ')(?:\\D|$)') : null;
 
   /* ---- scoring ---- */
   function brandHit(o, e) {
@@ -539,7 +551,7 @@ function runMatch(orph, salv, combo, progress) {
     if (o.btoks.length && e.ntext.includes(' ' + o.btoks.join(' ') + ' ')) return 1;
     if (o.btoks.length >= 2 && o.bcompact.length >= 5 && e.ctext.includes(o.bcompact)) return 1;   // "dot and key" vs "dotandkey"
     // fuzzy: single-token brand within 1 edit of a salvaging token (OCR noise) — Brand column only
-    if (o.brandSrc === 'Brand' && o.btoks.length === 1 && o.btoks[0].length >= 6) for (const t of e.tset) if (Math.abs(t.length - o.btoks[0].length) <= 1 && lev1(t, o.btoks[0])) return 0.9;
+    if (o.brandSrc === 'Brand' && o.btoks.length === 1 && o.btoks[0].length >= 6) { const bt = o.btoks[0], c0 = bt[0], c1 = bt[1]; for (const t of e.tset) if ((t[0] === c0 || t[1] === c1 || t[0] === c1) && Math.abs(t.length - bt.length) <= 1 && lev1(t, bt)) return 0.9; }
     return 0;
   }
   function lev1(a, b) {
@@ -549,13 +561,14 @@ function runMatch(orph, salv, combo, progress) {
     return d + (a.length - i) + (b.length - j) <= 1;
   }
   function descScore(o, e) {
-    if (!o.dt.length) return { s: 0, hit: 0 };
-    let tot = 0, got = 0, hit = 0, specHit = 0;
-    for (const t of o.dt) { const w = idf(t) * (GENERIC.has(t) ? 0.35 : 1); tot += w; if (e.tset.has(t)) { got += w; hit++; if (!GENERIC.has(t)) specHit++; } }
-    const covO = tot ? got / tot : 0;
-    let stot = 0, sgot = 0;
-    for (const t of e.tset) { if (o.btoks.includes(t)) continue; const w = idf(t); stot += w; if (o.dt.includes(t)) sgot += w; }
-    const covS = stot ? Math.min(1, sgot / Math.min(stot, Math.max(tot * 1.6, 1e-9))) : 0;
+    if (!o.dt.length) return { s: 0, hit: 0, specHit: 0 };
+    let got = 0, hit = 0, specHit = 0, sgot = 0;
+    const dt = o.dt, w = o.dtw, gen = o.dtGen, tset = e.tset;
+    for (let j = 0; j < dt.length; j++) if (tset.has(dt[j])) { got += w[j]; hit++; if (!gen[j]) specHit++; }
+    const U = o.dtU, Uw = o.dtUw; for (let j = 0; j < U.length; j++) if (tset.has(U[j])) sgot += Uw[j];
+    let stot = e.wsum; const B = o.btoks; for (let j = 0; j < B.length; j++) if (tset.has(B[j])) stot -= o.btw[j];
+    const tot = o.tot, covO = tot ? got / tot : 0;
+    const covS = stot > 1e-9 ? Math.min(1, sgot / Math.min(stot, Math.max(tot * 1.6, 1e-9))) : 0;
     return { s: 0.78 * covO + 0.22 * covS, hit, specHit };
   }
   function gate(o, e) {
@@ -589,39 +602,50 @@ function runMatch(orph, salv, combo, progress) {
       else if (d.specHit === 2) s = Math.min(s, 0.80);
       else s = Math.min(s, 0.6);   // a single generic noun with no brand cannot identify a shipment
     }
-    if (o.models.length && !o.models.some(m => new RegExp('(^|\\D)' + m + '(\\D|$)').test(e.ntext))) { s *= 0.85; basis += '; model/number in orphan desc not found'; }
+    if (o.modelRe && !o.modelRe.test(e.ntext)) { s *= 0.85; basis += '; model/number in orphan desc not found'; }
     const g = gate(o, e); if (g) return { s: 0, reject: g, rs: s };
     return { s, b: b0, d: d.s, specHit: d.specHit, basis };
   }
 
   function candidates(o, scope) {
-    const keys = [...new Set([...o.btoks, ...o.dt])];
     const lists = [];
-    for (const t of keys) {
-      const a = scope === 'site' ? siteIdx.get(o.site + '|' + t) : crossIdx.get(t);
-      if (a && a.length) lists.push({ t, a, w: idf(t) * (o.btoks.includes(t) ? 2 : GENERIC.has(t) ? 0.3 : 1) });
+    for (const t of o.keys) {
+      const arr = scope === 'site' ? siteIdx.get(o.site + '|' + t) : crossIdx.get(t);
+      if (arr && arr.length) lists.push({ a: arr, w: idf(t) * (o.btoks.includes(t) ? 2 : GENERIC.has(t) ? 0.3 : 1) });
     }
     if (!lists.length) return [];
-    const acc = new Map();
     lists.sort((x, y) => x.a.length - y.a.length);
-    for (const L of lists) { if (L.a.length > 25000 && acc.size > 50) continue; for (const i of L.a) acc.set(i, (acc.get(i) || 0) + L.w); }
-    // if orphan has a brand, a candidate must contain at least one brand token, unless desc-only path is possible
-    let arr = [...acc.entries()];
-    arr.sort((x, y) => y[1] - x[1]);
-    return arr.slice(0, CFG.MAX_SCORE_CANDS).map(x => x[0]);
+    nTouched = 0;
+    for (let li = 0; li < lists.length; li++) {
+      const L = lists[li];
+      // very common words (e.g. "oil", "black") only re-rank rows already found through rarer words
+      if (li > 0 && L.a.length > 3000 && nTouched > 0) {
+        for (let j = 0; j < nTouched; j++) { const i = touched[j]; if (bsearch(L.a, i)) accW[i] += L.w; }
+        continue;
+      }
+      const A = L.a;
+      for (let j = 0; j < A.length; j++) { const i = A[j]; if (accW[i] === 0) touched[nTouched++] = i; accW[i] += L.w; }
+    }
+    const out = new Array(nTouched);
+    for (let j = 0; j < nTouched; j++) out[j] = touched[j];
+    let res = out;
+    if (nTouched > CFG.MAX_SCORE_CANDS) { out.sort((x, y) => accW[y] - accW[x]); res = out.slice(0, CFG.MAX_SCORE_CANDS); }
+    for (let j = 0; j < nTouched; j++) accW[touched[j]] = 0;
+    return res;
   }
+  function bsearch(A, v) { let lo = 0, hi = A.length - 1; while (lo <= hi) { const m = (lo + hi) >> 1; if (A[m] === v) return true; if (A[m] < v) lo = m + 1; else hi = m - 1; } return false; }
 
   /* ---- generate candidate pairs ---- */
   const pairs = []; const unmatchedReason = new Array(O.length).fill('');
   const excluded = new Array(O.length).fill(false);
   for (let k = 0; k < O.length; k++) {
-    if (k % 250 === 0) progress(0.12 + 0.75 * k / O.length, 'Matching orphans… ' + k.toLocaleString() + ' / ' + O.length.toLocaleString());
+    if (k % 400 === 0) { await new Promise(r => setTimeout(r, 0)); } if (k % 250 === 0) progress(0.12 + 0.75 * k / O.length, 'Matching orphans… ' + k.toLocaleString() + ' / ' + O.length.toLocaleString());
     const o = O[k];
     if (!o.brand && !o.descRaw) { excluded[k] = true; unmatchedReason[k] = 'Excluded — no brand and no product description'; continue; }
     if (!o.brand && !o.specific.length) { excluded[k] = true; unmatchedReason[k] = 'Excluded — description too generic to identify (e.g. packaging only) and no brand'; continue; }
     const found = []; let bestReject = null, bestCrossLow = null;
     const scopes = [];
-    if (salvSites.has(o.site)) scopes.push('site'); scopes.push('cross');
+    if (salvSites.has(o.site)) scopes.push('site'); if (o.dt.length) scopes.push('cross');   // cross-site needs description evidence
     for (const scope of scopes) {
       for (const i of candidates(o, scope)) {
         const e = pool[i];
@@ -754,6 +778,7 @@ function runMatch(orph, salv, combo, progress) {
 
   /* ---------- run (Web Worker, main-thread fallback) ---------- */
   const WORKER_SRC = [
+    "self.postMessage({ type: 'ready' });",
     "try { importScripts('https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js'); } catch (e) { self.postMessage({ type: 'nolib' }); }",
     document.getElementById('engine').textContent,
     readBooks.toString(),
@@ -761,7 +786,7 @@ function runMatch(orph, salv, combo, progress) {
     "  var p = function (v, t) { self.postMessage({ type: 'p', v: v, t: t }); };",
     "  var books = await readBooks(ev.data.o, ev.data.s, p, XLSX);",
     "  p(0.1, 'Matching…');",
-    "  var res = runMatch(books.orph, books.salv, books.combo, function (v, t) { p(0.1 + v * 0.9, t); });",
+    "  var res = await runMatch(books.orph, books.salv, books.combo, function (v, t) { p(0.1 + v * 0.9, t); });",
     "  res.stats.sheets = books.sheets; self.postMessage({ type: 'done', res: res });",
     "} catch (e) { self.postMessage({ type: 'err', msg: (e && e.message) || String(e) }); } };"
   ].join('\n');
@@ -783,37 +808,50 @@ function runMatch(orph, salv, combo, progress) {
     return { orph, salv, combo, sheets: { orphan: oName, salvaging: sName, combo: cName || '(none found)' } };
   }
 
+  let running = false;
   $('go').addEventListener('click', () => {
-    hideErr(); $('go').disabled = true; prog(0, 'Starting…');
-    let worker;
-    try { worker = new Worker(URL.createObjectURL(new Blob([WORKER_SRC], { type: 'text/javascript' }))); }
-    catch (e) { return runMain(); }
-    let noLib = false;
-    worker.onmessage = ev => {
-      const m = ev.data;
-      if (m.type === 'nolib') { noLib = true; worker.terminate(); runMain(); }
-      else if (m.type === 'p') prog(m.v, m.t);
-      else if (m.type === 'done') { worker.terminate(); finish(m.res); }
-      else if (m.type === 'err') { worker.terminate(); fail(m.msg); }
+    if (running) return;
+    hideErr(); running = true; $('go').disabled = true; prog(0, 'Starting…');
+    let worker, settled = false, lastMsg = Date.now(), ready = false;
+    const fallback = why => {           // background thread unavailable here: run on this tab instead
+      if (settled) return; settled = true; clearInterval(dog);
+      try { worker && worker.terminate(); } catch (e) {}
+      runMain(why);
     };
-    worker.onerror = e => { e.preventDefault(); worker.terminate(); if (!noLib) runMain(); };
-    worker.postMessage({ o: files.o, s: files.s });
+    // watchdog: if the background thread never starts or goes silent, switch to this tab
+    const dog = setInterval(() => {
+      if (!ready && Date.now() - lastMsg > 4000) fallback('start');
+      else if (ready && Date.now() - lastMsg > 45000) fallback('stall');
+    }, 1000);
+    try { worker = new Worker(URL.createObjectURL(new Blob([WORKER_SRC], { type: 'text/javascript' }))); }
+    catch (e) { return fallback('blocked'); }
+    worker.onmessage = ev => {
+      if (settled) return;
+      const m = ev.data; lastMsg = Date.now();
+      if (m.type === 'ready') ready = true;
+      else if (m.type === 'nolib') fallback('lib');
+      else if (m.type === 'p') prog(m.v, m.t);
+      else if (m.type === 'done') { settled = true; clearInterval(dog); worker.terminate(); finish(m.res); }
+      else if (m.type === 'err') { settled = true; clearInterval(dog); worker.terminate(); fail(m.msg); }
+    };
+    worker.onerror = e => { e.preventDefault(); fallback('error'); };
+    try { worker.postMessage({ o: files.o, s: files.s }); } catch (e) { fallback('post'); }
   });
 
   async function runMain() {
     try {
-      prog(0.01, 'Processing on this tab (the page may pause briefly)…');
-      await new Promise(r => setTimeout(r, 50));
+      prog(0.01, 'Reading files on this tab (the page pauses for a few seconds)…');
+      await new Promise(r => setTimeout(r, 60));
       const books = await readBooks(files.o, files.s, prog, window.XLSX);
       await new Promise(r => setTimeout(r, 30));
-      const res = runMatch(books.orph, books.salv, books.combo, (v, t) => prog(0.1 + v * 0.9, t));
+      const res = await runMatch(books.orph, books.salv, books.combo, (v, t) => prog(0.1 + v * 0.9, t));
       res.stats.sheets = books.sheets; finish(res);
     } catch (e) { fail(e.message || String(e)); }
   }
-  function fail(msg) { $('prog').hidden = true; $('go').disabled = false; showErr('Matching stopped: ' + msg); }
+  function fail(msg) { running = false; $('prog').hidden = true; $('go').disabled = false; showErr('Matching stopped: ' + msg); }
 
   function finish(res) {
-    data = res; visual.clear(); page = 0;
+    running = false; data = res; visual.clear(); page = 0;
     prog(1, 'Done · ' + res.results.length.toLocaleString() + ' matches from ' + res.stats.orphans.toLocaleString() + ' orphan rows');
     $('go').disabled = false; $('ex-tag').hidden = true;
     $('dl-csv').disabled = false; $('dl-xlsx').disabled = false;
