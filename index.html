@@ -72,6 +72,18 @@ h2{font-family:var(--f-display);font-weight:700;font-size:16px;margin:0;letter-s
 .err{margin-top:14px;background:var(--red-soft);border:1px solid #E9B9B2;color:var(--red);border-radius:var(--r);padding:12px 16px;font-size:13.5px}
 
 /* rules */
+details.imgcfg{margin-top:14px;background:var(--surface);border:1px solid var(--line);border-radius:var(--r)}
+details.imgcfg summary{cursor:pointer;padding:12px 16px;font-weight:600;font-size:13.5px;color:var(--sfx-deep);list-style:none;display:flex;gap:10px;align-items:center}
+details.imgcfg summary::before{content:"+";font-family:var(--f-mono);width:16px}
+details.imgcfg[open] summary::before{content:"–"}
+.imgcfg-body{padding:0 16px 16px;display:grid;gap:10px}
+.imgcfg-body p{margin:0;font-size:13px;color:var(--ink-2);max-width:95ch}
+.imgcfg-row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.imgcfg-row input[type=url],.imgcfg-row input[type=password]{font:13px var(--f-mono);border:1px solid var(--line);border-radius:7px;padding:8px 10px;background:var(--surface);color:var(--ink);min-width:0;flex:1 1 260px}
+.imgcfg-row label{display:flex;gap:8px;align-items:center;font-size:13.5px;font-weight:500}
+.img-msg{font-size:12.5px;color:var(--ink-2)}
+.img-msg.ok{color:var(--sfx-deep)} .img-msg.bad{color:var(--red)}
+.p-off{background:var(--line-2);color:var(--ink-3)} .p-on{background:var(--sfx-green);color:#fff}
 details.rules{margin-top:16px;background:var(--surface);border:1px solid var(--line);border-radius:var(--r)}
 details.rules summary{cursor:pointer;padding:12px 16px;font-weight:600;font-size:13.5px;color:var(--sfx-deep);list-style:none;display:flex;gap:8px;align-items:center}
 details.rules summary::before{content:"+";font-family:var(--f-mono);width:16px}
@@ -190,6 +202,20 @@ footer{margin-top:28px;padding-top:12px;border-top:1px solid var(--line);color:v
     </div>
   </section>
 
+  <details class="imgcfg" id="imgcfg">
+    <summary>Image volume check <span class="pill p-off" id="img-state">Off</span></summary>
+    <div class="imgcfg-body">
+      <p>For matched Personal Care, Beauty and Home &amp; Kitchen rows where the salvaging description states a volume or weight but the orphan description does not, the dashboard reads the volume printed on the Back, Tag and Brand images, then re-matches. A 100 ml bottle can then no longer pair with a 48 ml listing. This needs the Image Volume Reader Apps Script, set up once, and works when you open this dashboard as the HTML file in Chrome.</p>
+      <div class="imgcfg-row"><label><input type="checkbox" id="img-on"> Read volumes from images</label></div>
+      <div class="imgcfg-row">
+        <input type="url" id="img-url" placeholder="Apps Script web app URL (ends in /exec)" aria-label="Apps Script web app URL">
+        <input type="password" id="img-key" placeholder="Access key" aria-label="Access key">
+        <button class="btn sm" id="img-test" type="button">Test connection</button>
+      </div>
+      <div class="img-msg" id="img-msg">Not connected.</div>
+    </div>
+  </details>
+
   <div class="prog" id="prog" hidden>
     <div class="prog-row"><span id="prog-t">Starting…</span><span id="prog-p" class="mono">0%</span></div>
     <div class="prog-track"><div class="prog-fill" id="prog-f"></div></div>
@@ -220,6 +246,7 @@ footer{margin-top:28px;padding-top:12px;border-top:1px solid var(--line);color:v
           <li>Brand + product type + key attributes must agree; 70% is the floor, 85%+ is Exact, cross-site needs 90%+.</li>
           <li>Category must agree with what the salvaging description is (Footwear brand ≠ jeans).</li>
           <li>Volume / weight / pack count must match when both sides state it (200 ml ≠ 400 ml).</li>
+          <li>Personal Care, Beauty, Home &amp; Kitchen: if only the salvaging side states a volume, it is read from the images when Image volume check is on. If it can't be read, the match drops to Similar and is flagged "confirm on image".</li>
           <li>Accessory never matches a primary product (cover, case, guard, cable ≠ phone).</li>
           <li>Brand only → Brand column, else Entered Brand; description only → description vs description.</li>
           <li>Ties broken by ageing fit, then picked month Sep › Aug › Jul › Jun › May › Apr › Mar.</li>
@@ -433,7 +460,8 @@ function num(v) { const n = parseFloat(v); return isFinite(n) ? n : null; }
 /* ============================================================
    MAIN
    ============================================================ */
-async function runMatch(orph, salv, combo, progress) {
+async function runMatch(orph, salv, combo, progress, opts) {
+  const imageQty = (opts && opts.imageQty) || {};
   progress = progress || (() => {});
   const oc = resolveCols(Object.keys(orph[0] || {}), ORPH_SPEC);
   const sc = resolveCols(Object.keys(salv[0] || {}), SALV_SPEC);
@@ -530,7 +558,7 @@ async function runMatch(orph, salv, combo, progress) {
     return {
       idx, r, site: siteKey(r[oc.site]), siteRaw: r[oc.site], age: num(r[oc.age]),
       brand, brandSrc, btoks, weakBrand, bcompact: brand.replace(/\s/g, ''), descRaw, dt, specific,
-      q: quantities(descRaw), allow,
+      imgQty: imageQty[idx] || '', q: quantities(descRaw + (imageQty[idx] ? ' ' + imageQty[idx] : '')), allow,
       keys: [...new Set([...btoks, ...dt])],
       models: (String(descRaw).match(/(?<![\d.])\d{2,4}(?![\d.]|\s*(?:%|ml|l\b|ltr|g\b|gm|gms|kg|mg|pcs|pc\b|x\b|cm|mm|inch|w\b|mah|gb|tb))/gi) || []), cat: r[oc.category],
       acc: dt.some(x => ACC_WORDS.has(x)), prim: dt.some(x => PRIMARY_WORDS.has(x))
@@ -694,9 +722,10 @@ async function runMatch(orph, salv, combo, progress) {
   const results = [], notMatched = [];
   for (let k = 0; k < O.length; k++) {
     const o = O[k], p = assigned[k], r = o.r;
-    if (!p) { notMatched.push(Object.assign({}, r, { 'REASON': unmatchedReason[k] })); continue; }
+    if (!p) { notMatched.push(Object.assign({}, r, o.imgQty ? { 'IMAGE VOLUME': o.imgQty } : {}, { 'REASON': unmatchedReason[k] })); continue; }
     const e = pool[p.e];
     const notes = [p.basis];
+    if (o.imgQty) notes.push('Volume read from image: ' + o.imgQty);
     if (e.ptype === 'FLOOR' && !p.ageOk) notes.push('Floor ageing rule not met (orphan ageing ≥ salvaging)');
     if (e.bundle && !e.isCombo) notes.push('Pack/bundle in salvaging desc — verify quantity');
     let comboRemark = '';
@@ -721,7 +750,7 @@ async function runMatch(orph, salv, combo, progress) {
       'Pendency Type': e.ptype, 'Picked Month': e.month || '',
       'Confidence': p.s >= CFG.EXACT ? 'Exact' : 'Similar', 'Match Score %': Math.round(p.s * 100),
       'Notes': notes.join('; '),
-      _tier: p.tier, _brand: o.brand, _back: oc.backImg ? (r[oc.backImg] || '') : ''
+      'Image Volume': o.imgQty, _oidx: k, _tier: p.tier, _brand: o.brand, _back: oc.backImg ? (r[oc.backImg] || '') : ''
     });
   }
   results.sort((a, b) => a._tier - b._tier || b['Match Score %'] - a['Match Score %']);
@@ -743,7 +772,7 @@ async function runMatch(orph, salv, combo, progress) {
   const MB = 1024 * 1024, LIMIT = 200 * MB, PAGE = 100;
   const COLS = ['BARCODE', 'SITE NAME (ORPHAN)', 'AGEING (ORPHAN)', 'AWB', 'AGEING', 'DC Liability (Salvaging)', 'Match Type', 'Age', 'COMBO REMARKS',
     'Orphan Category', 'Orphan Description', 'Salvaging Description', 'Brand image url', 'tag image'];
-  const EXTRA = ['Pendency Type', 'Picked Month', 'Confidence', 'Match Score %', 'Visual Confirmation (Y/N)', 'Notes'];
+  const EXTRA = ['Pendency Type', 'Picked Month', 'Image Volume', 'Confidence', 'Match Score %', 'Visual Confirmation (Y/N)', 'Notes'];
   const HEAD_TIPS = { 'AGEING': 'Salvaging max_ageing (days)', 'Age': 'Ageing gap = salvaging ageing − orphan ageing (days)' };
   const files = { o: null, s: null };
   let data = null, view = 'm', page = 0, filtered = [];
@@ -782,12 +811,14 @@ async function runMatch(orph, salv, combo, progress) {
     "try { importScripts('https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js'); } catch (e) { self.postMessage({ type: 'nolib' }); }",
     document.getElementById('engine').textContent,
     readBooks.toString(),
+    "var BOOKS = null;",
     "self.onmessage = async function (ev) { try {",
-    "  var p = function (v, t) { self.postMessage({ type: 'p', v: v, t: t }); };",
-    "  var books = await readBooks(ev.data.o, ev.data.s, p, XLSX);",
+    "  var d = ev.data, p = function (v, t) { self.postMessage({ type: 'p', v: v, t: t }); };",
+    "  if (d.o) BOOKS = await readBooks(d.o, d.s, p, XLSX);",
+    "  if (!BOOKS) throw new Error('Files are not loaded.');",
     "  p(0.1, 'Matching…');",
-    "  var res = await runMatch(books.orph, books.salv, books.combo, function (v, t) { p(0.1 + v * 0.9, t); });",
-    "  res.stats.sheets = books.sheets; self.postMessage({ type: 'done', res: res });",
+    "  var res = await runMatch(BOOKS.orph, BOOKS.salv, BOOKS.combo, function (v, t) { p(0.1 + v * 0.9, t); }, { imageQty: d.imageQty || {} });",
+    "  res.stats.sheets = BOOKS.sheets; self.postMessage({ type: 'done', res: res });",
     "} catch (e) { self.postMessage({ type: 'err', msg: (e && e.message) || String(e) }); } };"
   ].join('\n');
 
@@ -809,45 +840,179 @@ async function runMatch(orph, salv, combo, progress) {
   }
 
   let running = false;
-  $('go').addEventListener('click', () => {
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  function workerFail(why) { const e = new Error('Background processing unavailable (' + why + ')'); e.workerFail = true; return e; }
+
+  // Background-thread matcher: parses the files once, keeps them, and re-matches on request.
+  function makeWorkerMatcher() {
+    let worker;
+    try { worker = new Worker(URL.createObjectURL(new Blob([WORKER_SRC], { type: 'text/javascript' }))); } catch (e) { return null; }
+    let pending = null, ready = false, noLib = false, last = Date.now();
+    const settle = (kind, v) => { const p = pending; pending = null; if (p) p[kind](v); };
+    worker.onmessage = ev => {
+      const m = ev.data; last = Date.now();
+      if (m.type === 'ready') { ready = true; return; }
+      if (m.type === 'nolib') { noLib = true; settle('err', workerFail('library')); return; }
+      if (m.type === 'p') prog(m.v, m.t);
+      else if (m.type === 'done') settle('ok', m.res);
+      else if (m.type === 'err') settle('err', new Error(m.msg));
+    };
+    worker.onerror = e => { e.preventDefault(); settle('err', workerFail('error')); };
+    // watchdog: never started, or silent for 45 s → hand over to this tab
+    const dog = setInterval(() => {
+      if (!pending) return;
+      if (!ready && Date.now() - last > 4000) settle('err', workerFail('start'));
+      else if (ready && Date.now() - last > 45000) settle('err', workerFail('stall'));
+    }, 1000);
+    return {
+      match(payload) {
+        return new Promise((ok, err) => {
+          if (noLib) return err(workerFail('library'));
+          last = Date.now(); pending = { ok, err };
+          try { worker.postMessage(payload); } catch (e) { settle('err', workerFail('post')); }
+        });
+      },
+      close() { clearInterval(dog); try { worker.terminate(); } catch (e) {} }
+    };
+  }
+  // Same-tab matcher, used when the background thread is unavailable.
+  function makeMainMatcher() {
+    let books = null;
+    return {
+      async match(payload) {
+        if (payload.o) {
+          prog(0.01, 'Reading files on this tab (the page pauses for a few seconds)…'); await sleep(60);
+          books = await readBooks(payload.o, payload.s, prog, window.XLSX);
+        }
+        await sleep(30);
+        const res = await runMatch(books.orph, books.salv, books.combo, (v, t) => prog(0.1 + v * 0.9, t), { imageQty: payload.imageQty || {} });
+        res.stats.sheets = books.sheets; return res;
+      },
+      close() { books = null; }
+    };
+  }
+
+  $('go').addEventListener('click', async () => {
     if (running) return;
     hideErr(); running = true; $('go').disabled = true; prog(0, 'Starting…');
-    let worker, settled = false, lastMsg = Date.now(), ready = false;
-    const fallback = why => {           // background thread unavailable here: run on this tab instead
-      if (settled) return; settled = true; clearInterval(dog);
-      try { worker && worker.terminate(); } catch (e) {}
-      runMain(why);
-    };
-    // watchdog: if the background thread never starts or goes silent, switch to this tab
-    const dog = setInterval(() => {
-      if (!ready && Date.now() - lastMsg > 4000) fallback('start');
-      else if (ready && Date.now() - lastMsg > 45000) fallback('stall');
-    }, 1000);
-    try { worker = new Worker(URL.createObjectURL(new Blob([WORKER_SRC], { type: 'text/javascript' }))); }
-    catch (e) { return fallback('blocked'); }
-    worker.onmessage = ev => {
-      if (settled) return;
-      const m = ev.data; lastMsg = Date.now();
-      if (m.type === 'ready') ready = true;
-      else if (m.type === 'nolib') fallback('lib');
-      else if (m.type === 'p') prog(m.v, m.t);
-      else if (m.type === 'done') { settled = true; clearInterval(dog); worker.terminate(); finish(m.res); }
-      else if (m.type === 'err') { settled = true; clearInterval(dog); worker.terminate(); fail(m.msg); }
-    };
-    worker.onerror = e => { e.preventDefault(); fallback('error'); };
-    try { worker.postMessage({ o: files.o, s: files.s }); } catch (e) { fallback('post'); }
+    let m = makeWorkerMatcher(), res;
+    try {
+      try { if (!m) throw workerFail('blocked'); res = await m.match({ o: files.o, s: files.s }); }
+      catch (e) {
+        if (!e.workerFail) throw e;
+        if (m) m.close(); m = makeMainMatcher();
+        res = await m.match({ o: files.o, s: files.s });
+      }
+      res = await imageVolumePass(res, m);
+      flagUnverifiedVolumes(res);
+      m.close(); finish(res);
+    } catch (e) { if (m) m.close(); fail(e.message || String(e)); }
   });
 
-  async function runMain() {
-    try {
-      prog(0.01, 'Reading files on this tab (the page pauses for a few seconds)…');
-      await new Promise(r => setTimeout(r, 60));
-      const books = await readBooks(files.o, files.s, prog, window.XLSX);
-      await new Promise(r => setTimeout(r, 30));
-      const res = await runMatch(books.orph, books.salv, books.combo, (v, t) => prog(0.1 + v * 0.9, t));
-      res.stats.sheets = books.sheets; finish(res);
-    } catch (e) { fail(e.message || String(e)); }
+  /* ---------- image volume check ---------- */
+  const IMG_CATS = /personal\s*care|beauty|home\s*(&|and)\s*kitchen/i;
+  const QTY_RE = /(\d+(?:\.\d+)?)\s*(ml|ltr|litres?|liters?|l|kgs?|gms?|grams?|gr|g)(?![a-z])/i;
+  const hasQty = s => { const q = quantities(s); return q.v.length > 0 || q.w.length > 0; };
+  const volumeInScope = r => IMG_CATS.test(String(r['Orphan Category'] || '')) && hasQty(r['Salvaging Description']) && !hasQty(r['Orphan Description']);
+  const imageIds = r => [...new Set([r._back, r['tag image'], r['Brand image url']].map(driveId).filter(Boolean))];
+  const imgSeen = new Map();   // image ids → volume read, kept for this session
+
+  function lsGet(k) { try { return localStorage.getItem(k) || ''; } catch (e) { return ''; } }
+  function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
+  $('img-url').value = lsGet('sfx-img-url'); $('img-key').value = lsGet('sfx-img-key'); $('img-on').checked = lsGet('sfx-img-on') === '1';
+  const SCRIPT_URL = /^https:\/\/script\.google(usercontent)?\.com\//;
+  function imgCfg() {
+    const url = $('img-url').value.trim(), key = $('img-key').value.trim();
+    return $('img-on').checked && SCRIPT_URL.test(url) && key ? { url, key } : null;
   }
+  function imgState() { const on = !!imgCfg(); $('img-state').textContent = on ? 'On' : 'Off'; $('img-state').className = 'pill ' + (on ? 'p-on' : 'p-off'); }
+  ['img-url', 'img-key', 'img-on'].forEach(id => $(id).addEventListener('change', () => {
+    lsSet('sfx-img-url', $('img-url').value.trim()); lsSet('sfx-img-key', $('img-key').value.trim()); lsSet('sfx-img-on', $('img-on').checked ? '1' : ''); imgState();
+  }));
+  imgState();
+  function imgMsg(t, cls) { $('img-msg').textContent = t; $('img-msg').className = 'img-msg ' + (cls || ''); }
+  $('img-test').addEventListener('click', async () => {
+    const url = $('img-url').value.trim(), key = $('img-key').value.trim();
+    if (!SCRIPT_URL.test(url)) return imgMsg('Paste the Apps Script web app URL. It starts with https://script.google.com/ and ends in /exec.', 'bad');
+    imgMsg('Checking…');
+    try {
+      const r = await (await fetch(url + (url.includes('?') ? '&' : '?') + 'key=' + encodeURIComponent(key))).json();
+      if (r.ok) { imgMsg('Connected. Image volume check runs with the next matching.', 'ok'); $('img-on').checked = true; $('img-on').dispatchEvent(new Event('change')); }
+      else imgMsg('The script answered: ' + (r.error || 'not OK') + '. Check the access key.', 'bad');
+    } catch (e) {
+      imgMsg('Could not reach the script. Check the URL and that the deployment is set to "Anyone". The published claude.ai page cannot call outside services, so use the HTML file in Chrome.', 'bad');
+    }
+  });
+
+  async function readVolumes(targets, qty, cfg, label) {
+    const todo = [];
+    targets.forEach(r => {
+      const ids = imageIds(r), key = ids.join(',');
+      if (imgSeen.has(key)) { const v = imgSeen.get(key); if (v) qty[r._oidx] = v; }
+      else todo.push({ k: r._oidx, ids, key });
+    });
+    const batches = []; for (let i = 0; i < todo.length; i += 3) batches.push(todo.slice(i, i + 3));
+    let done = 0, fatal = '';
+    async function lane() {
+      while (batches.length && !fatal) {
+        const b = batches.shift();
+        try {
+          const resp = await fetch(cfg.url, { method: 'POST', body: JSON.stringify({ key: cfg.key, items: b.map(x => ({ k: x.k, ids: x.ids })) }) });
+          const j = await resp.json();
+          if (!j.ok) { fatal = j.error || 'the script refused the request'; break; }
+          b.forEach(x => {
+            const r = j.results && j.results[x.k];
+            if (!r || r.status === 'error' || r.status === 'timeout') return;   // not cached here, retried next run
+            imgSeen.set(x.key, r.qty || ''); if (r.qty) qty[x.k] = r.qty;
+          });
+        } catch (e) { if (!done) { fatal = 'could not reach the Apps Script'; break; } }
+        done += b.length;
+        prog(0.92, label + ' ' + Math.min(done, todo.length).toLocaleString() + ' / ' + todo.length.toLocaleString() + ' rows');
+      }
+    }
+    prog(0.92, label + ' 0 / ' + todo.length.toLocaleString() + ' rows');
+    await Promise.all(Array.from({ length: Math.min(6, batches.length) }, lane));
+    return fatal;
+  }
+
+  async function imageVolumePass(res, m) {
+    const cfg = imgCfg();
+    const ic = { enabled: !!cfg, rows: 0, read: 0, changed: 0, error: '' };
+    if (!cfg) { res.stats.imageCheck = ic; return res; }
+    const firstAwb = new Map(res.results.map(r => [r._oidx, r.AWB]));
+    const qty = {}, tried = new Set();
+    for (let pass = 1; pass <= 2; pass++) {   // pass 2 covers orphans newly matched to an AWB with a stated volume
+      const targets = res.results.filter(r => volumeInScope(r) && !tried.has(r._oidx) && imageIds(r).length);
+      if (!targets.length) break;
+      targets.forEach(r => tried.add(r._oidx));
+      const before = Object.keys(qty).length;
+      const err = await readVolumes(targets, qty, cfg, pass === 1 ? 'Reading volume on images…' : 'Reading volume on newly matched images…');
+      if (err) ic.error = err;
+      if (Object.keys(qty).length === before) break;
+      prog(0.96, 'Re-matching with volumes read from images…');
+      res = await m.match({ imageQty: qty });
+      if (err) break;
+    }
+    ic.rows = tried.size; ic.read = Object.keys(qty).length;
+    const finalAwb = new Map(res.results.map(r => [r._oidx, r.AWB]));
+    Object.keys(qty).forEach(k => { k = +k; if (firstAwb.has(k) && firstAwb.get(k) !== finalAwb.get(k)) ic.changed++; });
+    res.stats.imageCheck = ic;
+    return res;
+  }
+
+  // A volume that only the salvaging side states, and no image confirmed, is not an exact match.
+  function flagUnverifiedVolumes(res) {
+    let n = 0;
+    res.results.forEach(r => {
+      if (r['Image Volume'] || !volumeInScope(r)) return;
+      const m = String(r['Salvaging Description']).match(QTY_RE);
+      r.Notes += '; Volume only in salvaging desc (' + (m ? m[0] : '') + '): confirm on image';
+      if (r.Confidence === 'Exact') { r.Confidence = 'Similar'; r['Match Score %'] = Math.min(r['Match Score %'], 84); }
+      n++;
+    });
+    res.stats.imageCheck = Object.assign(res.stats.imageCheck || {}, { unverified: n });
+  }
+
   function fail(msg) { running = false; $('prog').hidden = true; $('go').disabled = false; showErr('Matching stopped: ' + msg); }
 
   function finish(res) {
@@ -857,9 +1022,13 @@ async function runMatch(orph, salv, combo, progress) {
     $('dl-csv').disabled = false; $('dl-xlsx').disabled = false;
     const sites = [...new Set(res.results.map(r => r['SITE NAME (ORPHAN)']).concat(res.notMatched.map(r => Object.values(r)[0])))].filter(Boolean).sort();
     $('f-site').innerHTML = '<option value="">All orphan sites</option>' + sites.map(s => '<option>' + esc(s) + '</option>').join('');
+    const infos = [];
+    const ic = res.stats.imageCheck || {};
+    if (ic.enabled) infos.push('Image volume check: volume read for ' + (ic.read || 0).toLocaleString() + ' of ' + (ic.rows || 0).toLocaleString() + ' rows; ' + (ic.changed || 0).toLocaleString() + ' matches were rejected or moved to a same-volume AWB.' + (ic.error ? ' Stopped early: ' + ic.error + '.' : ''));
+    if (ic.unverified) infos.push(ic.unverified.toLocaleString() + ' Personal Care / Beauty / Home & Kitchen matches have a volume only in the salvaging description' + (ic.enabled ? ' that the images did not show' : '') + '. They are marked Similar with "confirm on image".' + (ic.enabled ? '' : ' Turn on Image volume check to read volumes from the images.'));
     if (res.stats.unmappedSites && res.stats.unmappedSites.length)
-      $('info').hidden = false, $('info').textContent = ('No same-name DC in the Salvaging Base for: ' + res.stats.unmappedSites.join(', ') + '. These orphans were checked cross-site only. Add the mapping in SITE_ALIASES if they go by another name.');
-    else $('info').hidden = true;
+      infos.push(('No same-name DC in the Salvaging Base for: ' + res.stats.unmappedSites.join(', ') + '. These orphans were checked cross-site only. Add the mapping in SITE_ALIASES if they go by another name.'));
+    $('info').hidden = !infos.length; $('info').textContent = infos.join('  ·  ');
     renderKpis(); applyFilters();
   }
 
@@ -929,12 +1098,13 @@ async function runMatch(orph, salv, combo, progress) {
           thumbCell(r['Brand image url'], i, 'brand') + thumbCell(r['tag image'], i, 'tag') +
           '<td><span class="pill ' + (r['Pendency Type'] === 'FLOOR' ? 'p-floor' : 'p-loss') + '">' + r['Pendency Type'] + '</span></td>' +
           '<td>' + esc(r['Picked Month']) + '</td>' +
+          '<td class="mono">' + (r['Image Volume'] ? esc(r['Image Volume']) : '<span class="none">—</span>') + '</td>' +
           '<td><span class="pill ' + (r.Confidence === 'Exact' ? 'p-exact' : 'p-similar') + '">' + r.Confidence + '</span></td>' +
           '<td><div class="score"><span class="num">' + r['Match Score %'] + '%</span><span class="score-bar"><i style="width:' + r['Match Score %'] + '%"></i></span></div></td>' +
           '<td><select class="vis ' + (v === 'Y' ? 'y' : v === 'N' ? 'n' : '') + '" data-i="' + i + '" aria-label="Visual confirmation"><option value="">—</option><option' + (v === 'Y' ? ' selected' : '') + '>Y</option><option' + (v === 'N' ? ' selected' : '') + '>N</option></select></td>' +
           '<td class="note">' + esc(r.Notes) + '</td>' +
           '<td><a target="_blank" rel="noopener" href="https://www.google.com/search?tbm=isch&q=' + encodeURIComponent(String(r['Salvaging Description']).slice(0, 120)) + '">Verify ↗</a></td></tr>';
-      }).join('') || '<tr><td colspan="21" class="none" style="padding:24px">No matches for these filters.</td></tr>';
+      }).join('') || '<tr><td colspan="22" class="none" style="padding:24px">No matches for these filters.</td></tr>';
     } else {
       const heads = filtered.length ? Object.keys(filtered[0]) : (data && data.notMatched[0] ? Object.keys(data.notMatched[0]) : ['REASON']);
       $('th').innerHTML = '<tr>' + heads.map(h => '<th>' + esc(h) + '</th>').join('') + '</tr>';
@@ -961,7 +1131,7 @@ async function runMatch(orph, salv, combo, progress) {
     const imgs = [['Brand image', r['Brand image url']], ['Tag image', r['tag image']], ['Back image', r._back]].filter(x => driveId(x[1]));
     $('lb-imgs').innerHTML = imgs.map(x => { const id = driveId(x[1]);
       return '<div class="lb-img"><img referrerpolicy="no-referrer" alt="' + x[0] + '" src="https://drive.google.com/thumbnail?id=' + id + '&sz=w1000" onerror="this.replaceWith(Object.assign(document.createElement(\'div\'),{className:\'fb\',textContent:\'Image could not load here. Use Open in Drive.\'}))"><div class="cap"><span>' + x[0] + '</span><a target="_blank" rel="noopener" href="https://drive.google.com/file/d/' + id + '/view">Open in Drive ↗</a></div></div>'; }).join('');
-    $('lb-cmp').innerHTML = '<div><b>Orphan · ' + esc(r['Orphan Category']) + '</b>' + esc(r['Orphan Description']) + '</div><div><b>Salvaging · ' + esc(r['Pendency Type']) + ' · ageing ' + esc(r.AGEING) + '</b>' + esc(r['Salvaging Description']) + '</div>';
+    $('lb-cmp').innerHTML = '<div><b>Orphan · ' + esc(r['Orphan Category']) + (r['Image Volume'] ? ' · image volume ' + esc(r['Image Volume']) : '') + '</b>' + esc(r['Orphan Description']) + '</div><div><b>Salvaging · ' + esc(r['Pendency Type']) + ' · ageing ' + esc(r.AGEING) + '</b>' + esc(r['Salvaging Description']) + '</div>';
     $('lb').hidden = false; $('lb-x').focus();
   });
   $('lb-x').addEventListener('click', () => $('lb').hidden = true);
@@ -1000,6 +1170,8 @@ async function runMatch(orph, salv, combo, progress) {
       ['Salvaging AWBs scanned', st.salvaging], ['Combo AWBs in COMBO BASE', st.comboAwbs], ['FLOOR / LOSS source', st.floorRule],
       ['Sheets used', 'Orphan: ' + st.sheets.orphan + ' · Salvaging: ' + st.sheets.salvaging + ' · Combo: ' + st.sheets.combo],
       ['Thresholds', 'Exact ≥ 85%, Similar 70–84%, Cross-site ≥ 90% and ageing > 20 days'],
+      ['Image volume check', st.imageCheck && st.imageCheck.enabled ? 'On: volume read for ' + st.imageCheck.read + ' of ' + st.imageCheck.rows + ' rows; ' + st.imageCheck.changed + ' matches changed' : 'Off'],
+      ['Volume unverified (marked Similar)', (st.imageCheck && st.imageCheck.unverified) || 0],
       ['AGEING column', 'Salvaging max_ageing'], ['Age column', 'Salvaging ageing − Orphan ageing (days)']]), 'Run Summary');
     const out = XLSX.write(wb, { bookType: 'xlsx', type: 'array', compression: true });
     save('Orphan_Salvaging_Matches_' + stamp() + '.xlsx', new Blob([out], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }));
