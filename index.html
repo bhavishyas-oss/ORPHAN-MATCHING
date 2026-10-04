@@ -1,0 +1,978 @@
+<title>Orphan Salvage Matcher</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Manrope:wght@500;600;700;800&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<style>
+/* Layout: brand bar → upload deck (two drop bays + run) → KPI strip → filter bar → results ledger with image cells.
+   Single light theme by design: Shadowfax brand standard is light grounds, green/lime palette, no dark fills. */
+:root{
+  --sfx-green:#2E8B57; --sfx-deep:#1F6F45; --sfx-lime:#AACC00; --sfx-card:#F6FAF7; --sfx-amber:#C77700;
+  --bg:#FBFDFB; --surface:#FFFFFF; --ink:#16271E; --ink-2:#4A5D52; --ink-3:#7C8E83;
+  --line:#DCE7E0; --line-2:#EAF1EC; --lime-soft:#F3F8DC; --green-soft:#E6F2EB; --amber-soft:#FBF0DF;
+  --red:#B4372B; --red-soft:#F8E5E2; --blue:#2F6690; --blue-soft:#E4EEF5;
+  --f-display:"Manrope",ui-sans-serif,system-ui,sans-serif;
+  --f-body:"IBM Plex Sans",ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;
+  --f-mono:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  --r:10px; color-scheme:light;
+}
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+html,body{margin:0}
+img{max-width:100%}
+body{background:var(--bg);color:var(--ink);font-family:var(--f-body);font-size:14px;line-height:1.5}
+a{color:var(--sfx-deep)}
+:focus-visible{outline:2px solid var(--sfx-green);outline-offset:2px}
+.wrap{max-width:1480px;margin:0 auto;padding-inline:clamp(16px,3vw,32px);padding-block:0 48px}
+
+/* brand bar */
+.bar{background:var(--surface);border-bottom:1px solid var(--line);position:sticky;top:env(safe-area-inset-top,0px);z-index:20}
+.bar-in{max-width:1480px;margin:0 auto;padding:12px clamp(16px,3vw,32px);display:flex;align-items:center;gap:14px;flex-wrap:wrap}
+.mark{display:flex;align-items:center;gap:10px}
+.mark-dot{width:30px;height:30px;border-radius:8px;background:var(--sfx-green);position:relative;flex:none}
+.mark-dot::after{content:"";position:absolute;right:6px;top:6px;width:9px;height:9px;border-radius:50%;background:var(--sfx-lime)}
+.mark b{font-family:var(--f-display);font-weight:800;font-size:18px;letter-spacing:-.01em;color:var(--sfx-deep)}
+.mark span{display:block;font-size:11px;color:var(--ink-3);letter-spacing:.06em;text-transform:uppercase;line-height:1.2}
+.bar-title{margin-left:auto;font-family:var(--f-display);font-weight:700;font-size:15px;color:var(--ink-2)}
+
+h1{font-family:var(--f-display);font-weight:800;font-size:clamp(22px,2.6vw,30px);letter-spacing:-.02em;margin:28px 0 4px;text-wrap:balance}
+h1 em{font-style:normal;color:var(--sfx-green)}
+.lede{color:var(--ink-2);max-width:78ch;margin:0 0 20px}
+h2{font-family:var(--f-display);font-weight:700;font-size:16px;margin:0;letter-spacing:-.005em}
+.dbl{border-bottom:3px double var(--sfx-green);padding-bottom:4px;display:inline-block}
+
+/* upload deck */
+.deck{display:grid;grid-template-columns:1fr 1fr auto;gap:14px;align-items:stretch}
+@media (max-width:900px){.deck{grid-template-columns:1fr}}
+.bay{background:var(--surface);border:1.5px dashed #B9D2C2;border-radius:var(--r);padding:16px 18px;display:flex;gap:14px;align-items:flex-start;cursor:pointer;transition:border-color .15s,background .15s;min-width:0;position:relative}
+.bay:hover,.bay.drag{border-color:var(--sfx-green);background:var(--sfx-card)}
+.bay.ok{border-style:solid;border-color:var(--sfx-green);background:var(--sfx-card)}
+.bay input{position:absolute;inset:0;opacity:0;cursor:pointer}
+.bay-ico{width:40px;height:40px;border-radius:9px;background:var(--green-soft);display:grid;place-items:center;flex:none;color:var(--sfx-deep);font-family:var(--f-display);font-weight:800;font-size:13px}
+.bay.ok .bay-ico{background:var(--sfx-green);color:#fff}
+.bay-body{min-width:0}
+.bay-k{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-3);font-weight:600}
+.bay-t{font-family:var(--f-display);font-weight:700;font-size:15px;margin:1px 0 2px}
+.bay-s{font-size:12.5px;color:var(--ink-2);overflow-wrap:anywhere}
+.bay-f{font-family:var(--f-mono);font-size:12px;color:var(--sfx-deep);margin-top:6px;overflow-wrap:anywhere}
+.run{display:flex;flex-direction:column;gap:8px;justify-content:center;min-width:200px}
+.btn{font:600 14px/1 var(--f-body);border-radius:8px;padding:12px 18px;border:1px solid var(--line);background:var(--surface);color:var(--ink);cursor:pointer;display:inline-flex;align-items:center;gap:8px;justify-content:center;white-space:nowrap}
+.btn:hover{border-color:var(--sfx-green)}
+.btn.primary{background:var(--sfx-green);border-color:var(--sfx-green);color:#fff}
+.btn.primary:hover{background:var(--sfx-deep)}
+.btn:disabled{opacity:.45;cursor:not-allowed}
+.btn.sm{padding:8px 12px;font-size:13px}
+.hint{font-size:12px;color:var(--ink-3);text-align:center}
+
+.prog{margin-top:14px;background:var(--surface);border:1px solid var(--line);border-radius:var(--r);padding:12px 16px}
+.prog-row{display:flex;justify-content:space-between;gap:12px;font-size:13px;color:var(--ink-2)}
+.prog-track{height:6px;background:var(--line-2);border-radius:99px;margin-top:8px;overflow:hidden}
+.prog-fill{height:100%;width:0;background:linear-gradient(90deg,var(--sfx-green),var(--sfx-lime));transition:width .25s}
+.info{margin-top:14px;background:var(--amber-soft);border:1px solid #EBCB9C;color:#7A4A00;border-radius:var(--r);padding:12px 16px;font-size:13.5px}
+.err{margin-top:14px;background:var(--red-soft);border:1px solid #E9B9B2;color:var(--red);border-radius:var(--r);padding:12px 16px;font-size:13.5px}
+
+/* rules */
+details.rules{margin-top:16px;background:var(--surface);border:1px solid var(--line);border-radius:var(--r)}
+details.rules summary{cursor:pointer;padding:12px 16px;font-weight:600;font-size:13.5px;color:var(--sfx-deep);list-style:none;display:flex;gap:8px;align-items:center}
+details.rules summary::before{content:"+";font-family:var(--f-mono);width:16px}
+details.rules[open] summary::before{content:"–"}
+.rules-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:4px 28px;padding:0 16px 16px}
+.ladder{list-style:none;margin:0;padding:0;counter-reset:t}
+.ladder li{counter-increment:t;display:flex;gap:10px;padding:6px 0;border-bottom:1px solid var(--line-2);font-size:13px}
+.ladder li::before{content:"T" counter(t);font-family:var(--f-mono);font-size:11.5px;color:var(--sfx-deep);background:var(--green-soft);border-radius:4px;padding:1px 6px;height:fit-content;flex:none}
+.guards{margin:0;padding-left:18px;font-size:13px;color:var(--ink-2)}
+.guards li{padding:3px 0}
+.rules h3{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--ink-3);margin:10px 0 4px;font-weight:600}
+
+/* kpis */
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin:24px 0 18px}
+.kpi{background:var(--sfx-card);border:1px solid var(--line);border-radius:var(--r);padding:12px 14px;min-width:0}
+.kpi-k{font-size:11px;letter-spacing:.07em;text-transform:uppercase;color:var(--ink-3);font-weight:600}
+.kpi-v{font-family:var(--f-display);font-weight:800;font-size:26px;letter-spacing:-.02em;font-variant-numeric:tabular-nums;line-height:1.15}
+.kpi-s{font-size:12px;color:var(--ink-2)}
+.kpi.hero{background:var(--sfx-green);border-color:var(--sfx-green);color:#fff}
+.kpi.hero .kpi-k,.kpi.hero .kpi-s{color:#E3F3D0}
+
+/* tabs + filters */
+.tabs{display:flex;gap:4px;border-bottom:1px solid var(--line);margin-bottom:12px;flex-wrap:wrap}
+.tab{font:600 13.5px var(--f-body);padding:10px 14px;border:0;background:none;color:var(--ink-2);cursor:pointer;border-bottom:2px solid transparent;margin-bottom:-1px}
+.tab[aria-selected="true"]{color:var(--sfx-deep);border-bottom-color:var(--sfx-green)}
+.tab .n{font-family:var(--f-mono);font-size:11.5px;background:var(--line-2);border-radius:99px;padding:1px 7px;margin-left:6px}
+.filters{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px}
+.filters input,.filters select{font:13px var(--f-body);border:1px solid var(--line);border-radius:7px;padding:8px 10px;background:var(--surface);color:var(--ink);min-width:0}
+.filters input[type=search]{flex:1 1 220px}
+.filters .sp{flex:1}
+
+/* ledger */
+.ledger{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);overflow:auto;max-height:72vh}
+table{border-collapse:separate;border-spacing:0;width:max-content;min-width:100%;font-size:12.5px}
+th{position:sticky;top:0;z-index:2;background:var(--sfx-card);text-align:left;font-weight:600;font-size:11px;letter-spacing:.04em;text-transform:uppercase;color:var(--sfx-deep);padding:10px;border-bottom:2px solid var(--sfx-green);white-space:nowrap}
+td{padding:8px 10px;border-bottom:1px solid var(--line-2);vertical-align:top}
+tr:hover td{background:#FAFCF7}
+td.num{font-family:var(--f-mono);font-variant-numeric:tabular-nums;text-align:right;white-space:nowrap}
+td.mono{font-family:var(--f-mono);font-size:12px;white-space:nowrap}
+td.desc{max-width:280px;min-width:200px}
+td.note{max-width:240px;color:var(--ink-2);font-size:12px}
+tr.conf-exact td:first-child{box-shadow:inset 3px 0 0 var(--sfx-green)}
+tr.conf-similar td:first-child{box-shadow:inset 3px 0 0 var(--sfx-amber)}
+.pill{display:inline-block;font-size:11px;font-weight:600;padding:2px 8px;border-radius:99px;white-space:nowrap}
+.p-same{background:var(--green-soft);color:var(--sfx-deep)}
+.p-cross{background:var(--blue-soft);color:var(--blue)}
+.p-floor{background:var(--lime-soft);color:#5B6E00}
+.p-loss{background:var(--line-2);color:var(--ink-2)}
+.p-exact{background:var(--sfx-green);color:#fff}
+.p-similar{background:var(--amber-soft);color:var(--sfx-amber)}
+.p-combo{background:var(--amber-soft);color:#8A5300}
+.p-combo.full{background:var(--green-soft);color:var(--sfx-deep)}
+.score{display:flex;align-items:center;gap:6px}
+.score-bar{width:44px;height:5px;background:var(--line-2);border-radius:9px;overflow:hidden}
+.score-bar i{display:block;height:100%;background:var(--sfx-green)}
+.thumb{width:64px;height:64px;border-radius:7px;border:1px solid var(--line);background:var(--sfx-card);display:grid;place-items:center;overflow:hidden;cursor:zoom-in;padding:0}
+.thumb img{width:100%;height:100%;object-fit:cover;display:block}
+.thumb .fb{font-size:10.5px;color:var(--sfx-deep);text-align:center;line-height:1.2;padding:4px}
+.none{color:var(--ink-3)}
+.vis{font:12px var(--f-body);border:1px solid var(--line);border-radius:6px;padding:4px 6px;background:var(--surface)}
+.vis.y{border-color:var(--sfx-green);background:var(--green-soft)}
+.vis.n{border-color:#E9B9B2;background:var(--red-soft)}
+.pager{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:10px;font-size:13px;color:var(--ink-2);flex-wrap:wrap}
+.ex-tag{display:inline-block;font-size:11px;font-weight:700;letter-spacing:.06em;text-transform:uppercase;background:var(--lime-soft);color:#5B6E00;border-radius:4px;padding:2px 8px;margin-bottom:8px}
+
+/* lightbox */
+.lb{position:fixed;inset:0;background:rgba(22,39,30,.55);z-index:50;display:grid;place-items:center;padding:16px}
+.lb-card{background:var(--surface);border-radius:12px;max-width:1000px;width:100%;max-height:92vh;overflow:auto;padding:18px}
+.lb-head{display:flex;justify-content:space-between;gap:12px;align-items:flex-start;margin-bottom:12px}
+.lb-imgs{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px}
+.lb-img{border:1px solid var(--line);border-radius:9px;overflow:hidden;background:var(--sfx-card)}
+.lb-img img{width:100%;height:260px;object-fit:contain;display:block;background:#fff}
+.lb-img .cap{display:flex;justify-content:space-between;padding:6px 10px;font-size:12px;color:var(--ink-2)}
+.lb-img .fb{height:260px;display:grid;place-items:center;text-align:center;padding:16px;font-size:13px;color:var(--ink-2)}
+.cmp{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:14px}
+@media (max-width:640px){.cmp{grid-template-columns:1fr}}
+.cmp div{background:var(--sfx-card);border:1px solid var(--line);border-radius:9px;padding:10px 12px;font-size:13px}
+.cmp b{display:block;font-size:11px;letter-spacing:.07em;text-transform:uppercase;color:var(--ink-3);margin-bottom:2px}
+footer{margin-top:28px;padding-top:12px;border-top:1px solid var(--line);color:var(--ink-3);font-size:12px}
+@media (prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+
+<header class="bar"><div class="bar-in">
+  <div class="mark"><div class="mark-dot" aria-hidden="true"></div><div><b>Shadowfax</b><span>Middle Mile · Audit &amp; Compliance</span></div></div>
+  <div class="bar-title">Orphan ↔ Salvaging Match Desk</div>
+</div></header>
+
+<main class="wrap">
+  <h1>Match orphan shipments to <em>pending AWBs</em></h1>
+  <p class="lede">Upload the Orphan Base and the Salvaging Base (with its COMBO BASE sheet). Matching runs in your browser, so files stay on this device. Results follow the tier ladder below and can be downloaded as Excel or CSV.</p>
+
+  <section class="deck" aria-label="Upload files">
+    <label class="bay" id="bay-o">
+      <input type="file" id="file-o" accept=".xlsx,.xls,.xlsb,.csv">
+      <div class="bay-ico">OB</div>
+      <div class="bay-body">
+        <div class="bay-k">File 1</div>
+        <div class="bay-t">Orphan Base File</div>
+        <div class="bay-s">Site, Ageing, Brand / Tag / Back image URLs, Barcode, Entered Brand, Category, Brand, Description · .xlsx or .csv, up to 200 MB</div>
+        <div class="bay-f" id="f-o">Drop file or click to browse</div>
+      </div>
+    </label>
+    <label class="bay" id="bay-s">
+      <input type="file" id="file-s" accept=".xlsx,.xls,.xlsb">
+      <div class="bay-ico">SB</div>
+      <div class="bay-body">
+        <div class="bay-k">File 2</div>
+        <div class="bay-t">Salvaging Base File</div>
+        <div class="bay-s">Sheets: SALVAGING BASE (awb, product, DC Liability, ageing, pendency tagging, picked month) and COMBO BASE · .xlsx up to 200 MB</div>
+        <div class="bay-f" id="f-s">Drop file or click to browse</div>
+      </div>
+    </label>
+    <div class="run">
+      <button class="btn primary" id="go" disabled>Run matching</button>
+      <div class="hint" id="go-hint">Add both files to start</div>
+    </div>
+  </section>
+
+  <div class="prog" id="prog" hidden>
+    <div class="prog-row"><span id="prog-t">Starting…</span><span id="prog-p" class="mono">0%</span></div>
+    <div class="prog-track"><div class="prog-fill" id="prog-f"></div></div>
+  </div>
+  <div class="err" id="err" hidden></div>
+  <div class="info" id="info" hidden></div>
+
+  <details class="rules">
+    <summary>Matching logic applied</summary>
+    <div class="rules-grid">
+      <div>
+        <h3>Priority ladder (first match wins, one AWB per orphan)</h3>
+        <ol class="ladder">
+          <li>Same site · FLOOR pendency · exact (orphan ageing &lt; salvaging ageing preferred)</li>
+          <li>Same site · LOSS pendency · exact</li>
+          <li>Cross-site · FLOOR · near-exact, salvaging ageing &gt; 20 days</li>
+          <li>Cross-site · LOSS · near-exact, salvaging ageing &gt; 20 days</li>
+          <li>Combo Base · same site · exact (each combo item matched to a different orphan)</li>
+          <li>Combo Base · cross-site · near-exact, ageing &gt; 20 days</li>
+          <li>Same site · FLOOR · similar product (70–84%)</li>
+          <li>Same site · LOSS · similar product (70–84%)</li>
+          <li>Combo Base · same site · similar product</li>
+        </ol>
+      </div>
+      <div>
+        <h3>Hard checks on every match</h3>
+        <ul class="guards">
+          <li>Brand + product type + key attributes must agree; 70% is the floor, 85%+ is Exact, cross-site needs 90%+.</li>
+          <li>Category must agree with what the salvaging description is (Footwear brand ≠ jeans).</li>
+          <li>Volume / weight / pack count must match when both sides state it (200 ml ≠ 400 ml).</li>
+          <li>Accessory never matches a primary product (cover, case, guard, cable ≠ phone).</li>
+          <li>Brand only → Brand column, else Entered Brand; description only → description vs description.</li>
+          <li>Ties broken by ageing fit, then picked month Sep › Aug › Jul › Jun › May › Apr › Mar.</li>
+          <li>No brand and no description, or packaging-only text (plastic bag, box, Shadowfax), is excluded with a reason.</li>
+        </ul>
+        <h3>FLOOR vs LOSS</h3>
+        <ul class="guards"><li>Uses a PENDENCY TYPE column if present; otherwise Loss Bucket Sub Tagging containing "Floor" = FLOOR, everything else = LOSS.</li></ul>
+      </div>
+    </div>
+  </details>
+
+  <section id="results" aria-live="polite">
+    <div class="kpis" id="kpis"></div>
+    <div class="tabs" role="tablist">
+      <button class="tab" role="tab" id="tab-m" aria-selected="true">Matches <span class="n" id="n-m">0</span></button>
+      <button class="tab" role="tab" id="tab-n" aria-selected="false">Not matched <span class="n" id="n-n">0</span></button>
+    </div>
+    <div class="filters" id="filt">
+      <input type="search" id="q" placeholder="Search AWB, barcode, brand, description…" aria-label="Search">
+      <select id="f-type" aria-label="Match type"><option value="">All match types</option><option>Same-site</option><option>Cross-site</option></select>
+      <select id="f-pt" aria-label="Pendency"><option value="">FLOOR + LOSS</option><option>FLOOR</option><option>LOSS</option></select>
+      <select id="f-conf" aria-label="Confidence"><option value="">Exact + Similar</option><option>Exact</option><option>Similar</option></select>
+      <select id="f-combo" aria-label="Combo"><option value="">All shipments</option><option value="combo">Combo only</option><option value="single">Non-combo only</option></select>
+      <select id="f-site" aria-label="Site"><option value="">All orphan sites</option></select>
+      <span class="sp"></span>
+      <button class="btn sm" id="dl-csv" disabled>Download CSV</button>
+      <button class="btn sm primary" id="dl-xlsx" disabled>Download Excel</button>
+    </div>
+    <div id="ex-tag" class="ex-tag">Example rows from a sample run · upload files to see your results</div>
+    <div class="ledger"><table><thead id="th"></thead><tbody id="tb"></tbody></table></div>
+    <div class="pager"><span id="pg-info"></span><span><button class="btn sm" id="pg-prev">Previous</button> <button class="btn sm" id="pg-next">Next</button></span></div>
+  </section>
+
+  <footer>Images load straight from Google Drive and appear only when the file is shared as "Anyone with the link", or when you are signed in to a Google account that can open it. "Verify" opens a Google Images search for the salvaging description so you can confirm the look. Matching runs on the text fields; images are for visual sign-off.</footer>
+</main>
+
+<div class="lb" id="lb" hidden><div class="lb-card" role="dialog" aria-modal="true" aria-labelledby="lb-t">
+  <div class="lb-head"><div><div class="bay-k" id="lb-k"></div><h2 id="lb-t"></h2></div><button class="btn sm" id="lb-x">Close</button></div>
+  <div class="lb-imgs" id="lb-imgs"></div>
+  <div class="cmp" id="lb-cmp"></div>
+</div></div>
+
+<script id="engine">
+/* ============================================================
+   SHADOWFAX ORPHAN ↔ SALVAGING MATCH ENGINE
+   Pure JS — runs inside a Web Worker (also testable in Node).
+   ============================================================ */
+
+const CFG = {
+  EXACT: 0.85,            // ≥ this = Exact match
+  MIN: 0.70,              // reference bar — nothing below is reported as a match
+  CROSS_MIN: 0.90,        // cross-site must be near-exact
+  CROSS_AGE: 20,          // cross-site only for salvaging ageing > 20 days
+  TOPK: 6,                // candidates kept per orphan
+  MAX_SCORE_CANDS: 400,   // candidates scored per orphan per scope
+  SITE_ALIASES: {         // orphan site name → salvaging DC LIABILITY name (lower-case)
+    'blr superstore': 'bangalore superstore dc'
+  },
+  MONTH_RANK: { sep: 7, aug: 6, jul: 5, jun: 4, may: 3, apr: 2, mar: 1 }
+};
+
+/* ---------- header resolution (case/space-insensitive) ---------- */
+function keyOf(s) { return String(s || '').toLowerCase().replace(/[^a-z0-9]/g, ''); }
+function resolveCols(headers, spec) {
+  const map = {}; const keys = headers.map(keyOf);
+  for (const [field, aliases] of Object.entries(spec)) {
+    map[field] = null;
+    for (const a of aliases) { const i = keys.indexOf(keyOf(a)); if (i >= 0) { map[field] = headers[i]; break; } }
+  }
+  return map;
+}
+const ORPH_SPEC = {
+  site: ['Site', 'Site Name', 'DC', 'Hub'], age: ['AGEING', 'Ageing', 'Age'],
+  brandImg: ['Brand Image URL', 'Brand Image'], tagImg: ['Tag Image URL', 'Tag Image'], backImg: ['Back Image URL', 'Back Image'],
+  barcode: ['Barcode', 'Bar Code'], entered: ['Entered Brand'], category: ['Category'], brand: ['Brand'],
+  desc: ['Description', 'Brand Description', 'Product Description']
+};
+const SALV_SPEC = {
+  awb: ['awb_number', 'AWB', 'AWB Number'], desc: ['product_names', 'Product Description', 'Description', 'product_name'],
+  pcat: ['product_categories'], value: ['product_value'], site: ['DC LIABILITY', 'DC Liability', 'current location'],
+  ptype: ['PENDENCY TYPE', 'Pendency Type'], tag: ['Loss Bucket Tagging'], subtag: ['Loss Bucket Sub Tagging'],
+  age: ['max_ageing', 'Age', 'Ageing'], month: ['picked_month', 'Picked Month']
+};
+const COMBO_SPEC = { awb: ['awb_number', 'AWB', 'AWB Number'], desc: ['product_names', 'Product Description', 'Description'], pcat: ['product_categories'] };
+
+/* ---------- text utils ---------- */
+const STOP = new Set(('a an the of for and with in on to by from at as is it its or & x pcs pc piece pieces set pack combo free new ' +
+  'women woman womens men mens man girls girl boys boy kids kid unisex adult adults ladies gents baby ' +
+  'premium quality best original latest trendy stylish fashion fashionable modern classic designer branded style ' +
+  'all day use size free buy get offer type color colour multi multicolor multicolour assorted product item items ' +
+  'ml l ltr litre liter g gm gms gram grams kg kgs mg oz cm mm inch inches').split(/\s+/));
+// words that alone do not identify a product (packaging / generic)
+const GENERIC = new Set(('plastic bag bags box boxes cardboard carton container containers packet packets pouch item product bottle bottles ' +
+  'tube tubes fabric clothing cloth clothes think ahead wrapper package parcel envelope jar jars can tin shoe shoes shirt shirts pant pants ' +
+  'object thing material label tag unknown unidentified packaging pack sachet roll paper polybag cover transparent white black blue red green ' +
+  'small big large medium round square printed').split(/\s+/));
+const JUNK_VAL = /^(|-|na|n\/a|nan|nil|nill|null|none|no|unknown|not visible|not clear|not specified|not available|no brand|no brand name|detected brand name|brand|generic|0|unbranded|not mentioned)$/;
+
+function norm(s) {
+  return String(s == null ? '' : s).toLowerCase()
+    .replace(/&/g, ' and ').replace(/\+/g, ' plus ')
+    .replace(/(\d)\s*,\s*(\d)/g, '$1$2')
+    .replace(/[^a-z0-9.\s]/g, ' ').replace(/(?<!\d)\.|\.(?!\d)/g, ' ')
+    .replace(/\s+/g, ' ').trim();
+}
+function stem(t) {
+  if (t.length > 4 && t.endsWith('ies')) return t.slice(0, -3) + 'y';
+  if (t.length > 4 && /(ches|shes|xes|ses)$/.test(t)) return t.slice(0, -2);
+  if (t.length > 3 && t.endsWith('s') && !t.endsWith('ss')) return t.slice(0, -1);
+  return t;
+}
+const SYN = { tshirt: 'tshirt', tee: 'tshirt', facewash: 'facewash', bodywash: 'bodywash', earbud: 'earbud', earphone: 'earphone',
+  headphone: 'headphone', sneaker: 'shoe', trouser: 'pant', jean: 'jean', denim: 'jean', slipper: 'slipper', chappal: 'slipper',
+  flipflop: 'slipper', sandal: 'sandal', kurti: 'kurta', mobile: 'phone', smartphone: 'phone', cellphone: 'phone', tab: 'tablet',
+  perfume: 'perfume', edp: 'perfume', edt: 'perfume', fragrance: 'perfume', deodorant: 'deo', deodorants: 'deo', lipstick: 'lipstick',
+  moisturiser: 'moisturizer', moisturising: 'moisturizer', moisturizing: 'moisturizer', colour: 'color', shampoo: 'shampoo', serum: 'serum' };
+function tokens(s) {
+  let n = norm(s).replace(/\bt\s*shirt/g, 'tshirt').replace(/\bface\s*wash/g, 'facewash').replace(/\bbody\s*wash/g, 'bodywash')
+    .replace(/\bflip\s*flops?/g, 'flipflop').replace(/\bear\s*buds?/g, 'earbud').replace(/\bear\s*phones?/g, 'earphone')
+    .replace(/\bhead\s*phones?/g, 'headphone').replace(/\bsun\s*screen/g, 'sunscreen').replace(/\bhair\s*oil/g, 'hairoil');
+  const out = [];
+  for (let t of n.split(' ')) {
+    if (!t || t.length < 2 || /^\d/.test(t)) continue;
+    t = stem(t); t = SYN[t] || t;
+    if (!STOP.has(t)) out.push(t);
+  }
+  return out;
+}
+
+/* ---------- quantity / volume ---------- */
+const UNIT = { ml: ['v', 1], l: ['v', 1000], ltr: ['v', 1000], litre: ['v', 1000], liter: ['v', 1000], litres: ['v', 1000], liters: ['v', 1000],
+  g: ['w', 1], gm: ['w', 1], gms: ['w', 1], gram: ['w', 1], grams: ['w', 1], gr: ['w', 1], kg: ['w', 1000], kgs: ['w', 1000], mg: ['w', 0.001] };
+function quantities(s) {
+  const n = String(s == null ? '' : s).toLowerCase();
+  const q = { v: [], w: [], pack: null };
+  const re = /(\d+(?:\.\d+)?)\s*(ml|ltr|litres?|liters?|l|kgs?|gms?|grams?|gr|g|mg)(?![a-z])/g; let m;
+  while ((m = re.exec(n))) { const u = UNIT[m[2]]; if (u) q[u[0]].push(+m[1] * u[1]); }
+  const p = n.match(/(?:pack|set|combo)\s*of\s*(\d+)|(\d+)\s*(?:pcs|pieces|pc|n|units?)\b|\bx\s*(\d+)\b/);
+  if (p) { const v = +(p[1] || p[2] || p[3]); if (v > 0 && v < 500) q.pack = v; }
+  return q;
+}
+function qtyConflict(a, b) {
+  for (const d of ['v', 'w']) {
+    if (a[d].length && b[d].length) {
+      const ok = a[d].some(x => b[d].some(y => Math.abs(x - y) <= Math.max(x, y) * 0.03));
+      if (!ok) return (d === 'v' ? 'Volume' : 'Weight') + ' mismatch (' + a[d][0] + ' vs ' + b[d][0] + (d === 'v' ? ' ml)' : ' g)');
+    }
+  }
+  if (a.pack && b.pack && a.pack !== b.pack) return 'Pack size mismatch (' + a.pack + ' vs ' + b.pack + ')';
+  return null;
+}
+
+/* ---------- category families ---------- */
+const FAM_WORDS = {
+  footwear: 'shoe sneaker sandal slipper heel heels wedge wedges boot boots loafer flipflop crocs clog mojari jutti chappal footwear slider slide floater',
+  apparel: 'tshirt shirt jean pant trouser kurta kurtum saree sari dress top legging jegging short jacket hoodie sweatshirt sweater blazer coat lehenga dupatta skirt ' +
+    'kurti nightsuit pyjama pajama brief boxer vest bra panty lingerie innerwear tracksuit jogger cargo dhoti lungi suit gown frock romper blouse co ord sock socks cap scarf stole shawl tights',
+  bags: 'backpack handbag wallet purse sling clutch luggage trolley duffle tote',
+  jewellery: 'earring ring necklace pendant bracelet bangle anklet chain jewellery jewelry mangalsutra nosepin stud',
+  eyewear: 'sunglass sunglasses spectacle eyeglass frame frames eyewear goggle',
+  watch: 'watch smartwatch',
+  electronics: 'phone laptop tablet earbud earphone headphone speaker charger cable adapter powerbank camera tv television monitor keyboard mouse router ' +
+    'trimmer shaver dryer straightener iron drill bulb led fan cooler mixer grinder kettle induction neckband smartwatch projector printer usb hdmi',
+  mobile_acc: 'cover case protector tempered screenguard holder stand',
+  beauty_pc: 'shampoo conditioner facewash cleanser serum moisturizer cream lotion sunscreen lipstick kajal eyeliner mascara foundation primer compact ' +
+    'perfume deo soap bodywash toner gel hairoil wax scrub mask nail polish lip balm talc powder toothpaste toothbrush mouthwash razor sanitary pad diaper ' +
+    'wipes tissue sanitizer handwash conditioner concealer blush highlighter trimmer beard hair dye henna mehndi peel peeling exfoliant spf',
+  grocery: 'oil rice atta flour dal pulse tea coffee sugar salt masala spice ghee honey biscuit snack chips namkeen chocolate juice jam sauce ketchup pickle ' +
+    'noodle pasta oats cereal millet dry fruit almond cashew raisin seed nut makhana jaggery vinegar butter cheese paneer milk',
+  home: 'bedsheet pillow cushion curtain towel mat rug carpet blanket comforter quilt mattress organizer rack shelf hanger bucket mop broom dustbin ' +
+    'container lunchbox tiffin bottle flask jar kitchen cookware pan pot kadai tawa cooker knife spoon fork ladle plate bowl glass cup mug tray ' +
+    'detergent laundry cleaner freshener candle lamp decor vase frame clock lock tape adhesive glue tool hook stand stool chair table storage holder',
+  toys: 'toy toys puzzle doll teddy lego game rc car block blocks plush',
+  stationery: 'pen pencil notebook diary marker eraser sharpener stapler file folder register crayon paint brush book books novel guide',
+  health: 'tablet capsule syrup protein whey creatine supplement vitamin multivitamin ayurvedic churna medicine ointment balm bandage thermometer oximeter',
+  baby: 'diaper feeder sipper nipple rattle stroller'
+};
+const FAM = {}; for (const [f, w] of Object.entries(FAM_WORDS)) for (const t of w.split(/\s+/)) { const s = SYN[stem(t)] || stem(t); (FAM[s] = FAM[s] || new Set()).add(f); }
+function families(toks) { const s = new Set(); for (const t of toks) if (FAM[t]) for (const f of FAM[t]) s.add(f); return s; }
+const CAT_ALLOW = {
+  footwear: ['footwear'],
+  fashion: ['apparel', 'footwear', 'bags', 'jewellery', 'eyewear', 'watch'],
+  accessories: ['bags', 'jewellery', 'eyewear', 'watch', 'mobile_acc', 'apparel', 'electronics'],
+  electronics: ['electronics', 'mobile_acc', 'watch'],
+  personalcare: ['beauty_pc', 'health', 'baby'], beauty: ['beauty_pc', 'health'], healthandpersonalcare: ['beauty_pc', 'health'],
+  grocery: ['grocery', 'health'],
+  homeandkitchen: ['home', 'electronics', 'grocery'],
+  toys: ['toys', 'baby'], stationery: ['stationery'], books: ['stationery'], education: ['stationery', 'toys'],
+  medicines: ['health', 'beauty_pc'], nutraceuticals: ['health', 'grocery'], healthsupplement: ['health', 'grocery'],
+  healthandwellness: ['health', 'beauty_pc', 'grocery'], fitness: ['health', 'apparel', 'footwear', 'home'],
+  baby: ['baby', 'toys', 'beauty_pc', 'apparel'], babycare: ['baby', 'beauty_pc', 'toys'], babyproducts: ['baby', 'toys', 'beauty_pc'],
+  petcare: ['home', 'grocery', 'health'], petsupplies: ['home', 'grocery', 'health']
+};
+const ACC_WORDS = new Set(['cover', 'case', 'protector', 'tempered', 'screenguard', 'guard', 'strap', 'skin', 'cable', 'charger', 'adapter', 'adaptor', 'refill', 'nib', 'lens']);
+const PRIMARY_WORDS = new Set(['phone', 'laptop', 'tablet', 'watch', 'smartwatch', 'earbud', 'headphone', 'camera', 'ipad', 'iphone', 'macbook']);
+
+/* ---------- misc ---------- */
+function isPackagingBrand(b) { const k = keyOf(b); return /shadowfax|shadowfa|hadowfa|shadofax|shdowfax|sfx/.test(k); }
+function cleanBrand(b) { const s = norm(b); if (JUNK_VAL.test(s) || isPackagingBrand(b) || s.length < 2) return ''; return s; }
+function cleanDesc(d) {
+  const raw = String(d == null ? '' : d).trim(); const s = norm(raw);
+  if (JUNK_VAL.test(s) || /^not (visible|clear)|^unidentified|^no visible|^unable|^cannot|^can t/.test(s) || isPackagingBrand(raw) && tokens(raw).length <= 2) return '';
+  if (/^[a-z]{2,5}\d{6,}[a-z]*$/i.test(raw.replace(/\s/g, ''))) return ''; // AWB/code captured as description
+  return raw;
+}
+function monthRank(m) { const k = String(m || '').toLowerCase().slice(0, 3); return CFG.MONTH_RANK[k] || 0; }
+function siteKey(s) { const k = String(s || '').toLowerCase().replace(/\s+/g, ' ').trim(); return CFG.SITE_ALIASES[k] || k; }
+function driveId(u) { const m = String(u || '').match(/[?&]id=([\w-]{10,})|\/d\/([\w-]{10,})/); return m ? (m[1] || m[2]) : ''; }
+function num(v) { const n = parseFloat(v); return isFinite(n) ? n : null; }
+
+/* ============================================================
+   MAIN
+   ============================================================ */
+function runMatch(orph, salv, combo, progress) {
+  progress = progress || (() => {});
+  const oc = resolveCols(Object.keys(orph[0] || {}), ORPH_SPEC);
+  const sc = resolveCols(Object.keys(salv[0] || {}), SALV_SPEC);
+  const cc = resolveCols(Object.keys((combo && combo[0]) || {}), COMBO_SPEC);
+  const missing = [];
+  ['site', 'age', 'category', 'brand', 'desc'].forEach(f => { if (!oc[f]) missing.push('Orphan: ' + ORPH_SPEC[f][0]); });
+  ['awb', 'desc', 'site', 'age'].forEach(f => { if (!sc[f]) missing.push('Salvaging: ' + SALV_SPEC[f][0]); });
+  if (missing.length) throw new Error('Missing required column(s): ' + missing.join(', '));
+
+  /* ---- build salvaging pool ---- */
+  progress(0.02, 'Indexing salvaging base…');
+  const salvByAwb = new Map();
+  for (const r of salv) {
+    const awb = String(r[sc.awb] || '').trim(); if (!awb) continue;
+    if (!salvByAwb.has(awb)) salvByAwb.set(awb, r);
+  }
+  const comboGroups = new Map();
+  if (combo && cc.awb && cc.desc) for (const r of combo) {
+    const awb = String(r[cc.awb] || '').trim(); const d = r[cc.desc]; if (!awb || !d) continue;
+    if (!comboGroups.has(awb)) comboGroups.set(awb, []); comboGroups.get(awb).push(r);
+  }
+  function ptypeOf(r) {
+    const p = sc.ptype ? String(r[sc.ptype] || '') : (String(r[sc.subtag] || '') + ' ' + String(r[sc.tag] || ''));
+    return /floor/i.test(p) ? 'FLOOR' : 'LOSS';
+  }
+  const pool = [];
+  function addEntry(base, descRaw, isCombo, compIdx, compCount) {
+    const desc = String(descRaw == null ? '' : descRaw); const t = tokens(desc);
+    if (!t.length) return;
+    const site = base ? siteKey(base[sc.site]) : '';
+    pool.push({
+      i: pool.length, awb: String(base[sc.awb]).trim(), desc, toks: t, tset: new Set(t), ntext: ' ' + norm(desc) + ' ',
+      ctext: norm(desc).replace(/\s/g, ''), q: quantities(desc), fam: families(t),
+      site, siteRaw: base[sc.site], age: num(base[sc.age]), month: sc.month ? base[sc.month] : '', mrank: monthRank(sc.month ? base[sc.month] : ''),
+      ptype: ptypeOf(base), isCombo, compIdx, compCount,
+      useKey: isCombo ? base[sc.awb] + '#' + compIdx : String(base[sc.awb]).trim(),
+      acc: t.some(x => ACC_WORDS.has(x)), prim: t.some(x => PRIMARY_WORDS.has(x)),
+      bundle: /\b(pack of [2-9]|pack of \d{2}|combo|set of [2-9]|gift (pack|set|box)|kit)\b|\bx\s*[2-9]\b/i.test(desc)
+    });
+  }
+  for (const [awb, r] of salvByAwb) {
+    if (comboGroups.has(awb)) {
+      const g = comboGroups.get(awb);
+      g.forEach((c, k) => addEntry(r, c[cc.desc], true, k, g.length));
+    } else addEntry(r, r[sc.desc], false, 0, 1);
+  }
+  // combo AWBs not present in salvaging base: keep with blank site
+  for (const [awb, g] of comboGroups) if (!salvByAwb.has(awb)) {
+    const fake = { [sc.awb]: awb, [sc.site]: '', [sc.age]: null }; if (sc.month) fake[sc.month] = '';
+    g.forEach((c, k) => addEntry(fake, c[cc.desc], true, k, g.length));
+  }
+
+  /* ---- IDF + indexes ---- */
+  progress(0.08, 'Building search index…');
+  const df = new Map();
+  for (const e of pool) for (const t of e.tset) df.set(t, (df.get(t) || 0) + 1);
+  const N = pool.length;
+  const idf = t => Math.log(1 + N / (1 + (df.get(t) || 0)));
+  const siteIdx = new Map(); const crossIdx = new Map();
+  for (const e of pool) {
+    for (const t of e.tset) {
+      const k = e.site + '|' + t; let a = siteIdx.get(k); if (!a) siteIdx.set(k, a = []); a.push(e.i);
+      if (e.age != null && e.age > CFG.CROSS_AGE) { let b = crossIdx.get(t); if (!b) crossIdx.set(t, b = []); b.push(e.i); }
+    }
+    const ct = e.ctext; // compact index for brand lookups (multi-word brands)
+  }
+  const salvSites = new Set(pool.map(e => e.site));
+
+  /* ---- prepare orphans ---- */
+  const O = orph.map((r, idx) => {
+    const brandRaw = r[oc.brand], entRaw = oc.entered ? r[oc.entered] : '';
+    let brand = cleanBrand(brandRaw), brandSrc = brand ? 'Brand' : '';
+    const descRaw = cleanDesc(r[oc.desc]);
+    if (!brand && entRaw) { // rule 10: fall back to ENTERED BRAND
+      const eb = cleanBrand(entRaw); const et = tokens(eb);
+      if (eb && et.length && !et.every(t => GENERIC.has(t) || FAM[t])) { brand = eb; brandSrc = 'Entered Brand'; }
+    }
+    let btoks = tokens(brand);
+    const bdf = btoks.length ? Math.min(...btoks.map(t => df.get(t) || 0)) : 0;
+    let weakBrand = btoks.length > 0 && bdf > 400;           // brand words that are common English ("basic", "soft", "flowers")
+    if (brandSrc === 'Entered Brand' && bdf > 120) { brand = ''; btoks = []; brandSrc = ''; weakBrand = false; }
+    // a brand that is only generic words is not a brand
+    if (!btoks.length || btoks.every(t => GENERIC.has(t))) { brand = ''; btoks = []; brandSrc = ''; }
+    const dt = tokens(descRaw).filter(t => !btoks.includes(t));
+    const specific = dt.filter(t => !GENERIC.has(t));
+    const catKey = keyOf(r[oc.category]).replace('and', 'and');
+    const ofam = families(tokens(descRaw));
+    let allow = CAT_ALLOW[catKey] ? new Set(CAT_ALLOW[catKey]) : null;
+    // the orphan's own description narrows the allowed families (e.g. category Fashion + "shoe" ⇒ footwear only)
+    if (ofam.size) { const strong = [...ofam].filter(f => !allow || allow.has(f)); if (strong.length) allow = new Set(strong); }
+    return {
+      idx, r, site: siteKey(r[oc.site]), siteRaw: r[oc.site], age: num(r[oc.age]),
+      brand, brandSrc, btoks, weakBrand, bcompact: brand.replace(/\s/g, ''), descRaw, dt, specific,
+      q: quantities(descRaw), allow,
+      models: (String(descRaw).match(/(?<![\d.])\d{2,4}(?![\d.]|\s*(?:%|ml|l\b|ltr|g\b|gm|gms|kg|mg|pcs|pc\b|x\b|cm|mm|inch|w\b|mah|gb|tb))/gi) || []), cat: r[oc.category],
+      acc: dt.some(x => ACC_WORDS.has(x)), prim: dt.some(x => PRIMARY_WORDS.has(x))
+    };
+  });
+
+  /* ---- scoring ---- */
+  function brandHit(o, e) {
+    if (!o.brand) return 0;
+    if (o.btoks.length && e.ntext.includes(' ' + o.btoks.join(' ') + ' ')) return 1;
+    if (o.btoks.length >= 2 && o.bcompact.length >= 5 && e.ctext.includes(o.bcompact)) return 1;   // "dot and key" vs "dotandkey"
+    // fuzzy: single-token brand within 1 edit of a salvaging token (OCR noise) — Brand column only
+    if (o.brandSrc === 'Brand' && o.btoks.length === 1 && o.btoks[0].length >= 6) for (const t of e.tset) if (Math.abs(t.length - o.btoks[0].length) <= 1 && lev1(t, o.btoks[0])) return 0.9;
+    return 0;
+  }
+  function lev1(a, b) {
+    if (a === b) return true; let i = 0, j = 0, d = 0;
+    while (i < a.length && j < b.length) { if (a[i] === b[j]) { i++; j++; continue; } if (++d > 1) return false;
+      if (a.length > b.length) i++; else if (b.length > a.length) j++; else { i++; j++; } }
+    return d + (a.length - i) + (b.length - j) <= 1;
+  }
+  function descScore(o, e) {
+    if (!o.dt.length) return { s: 0, hit: 0 };
+    let tot = 0, got = 0, hit = 0, specHit = 0;
+    for (const t of o.dt) { const w = idf(t) * (GENERIC.has(t) ? 0.35 : 1); tot += w; if (e.tset.has(t)) { got += w; hit++; if (!GENERIC.has(t)) specHit++; } }
+    const covO = tot ? got / tot : 0;
+    let stot = 0, sgot = 0;
+    for (const t of e.tset) { if (o.btoks.includes(t)) continue; const w = idf(t); stot += w; if (o.dt.includes(t)) sgot += w; }
+    const covS = stot ? Math.min(1, sgot / Math.min(stot, Math.max(tot * 1.6, 1e-9))) : 0;
+    return { s: 0.78 * covO + 0.22 * covS, hit, specHit };
+  }
+  function gate(o, e) {
+    if (o.allow && e.fam.size && ![...e.fam].some(f => o.allow.has(f))) return 'Category conflict (' + (o.cat || '-') + ' vs ' + [...e.fam].join('/') + ')';
+    const qc = qtyConflict(o.q, e.q); if (qc) return qc;
+    if (e.acc && !o.acc) return 'Accessory (cover/case/cable…) vs primary product';
+    if (o.acc && !e.acc) return 'Accessory (cover/case/cable…) vs primary product';
+    return null;
+  }
+  function score(o, e) {
+    let b0 = brandHit(o, e);
+    // brands normally lead the listing title; a brand word buried deep in the text is weak evidence
+    const bpos = b0 && o.btoks.length ? e.toks.indexOf(o.btoks[0]) : -1;
+    if (b0 && bpos > 6) b0 *= 0.7; const b = o.weakBrand ? b0 * 0.6 : b0; const d = descScore(o, e);
+    let s = 0, basis = '';
+    if (o.brand && o.dt.length) {
+      if (b0) { s = 0.5 * b + 0.5 * d.s; basis = 'Brand + Description'; if (d.specHit === 0) { s = Math.min(s, 0.74); basis = 'Brand match, description weak'; } }
+      else { s = 0.75 * d.s; basis = 'Description only (brand not in salvaging desc)'; if (d.specHit < 2) s = Math.min(s, 0.6); }
+    } else if (o.brand) { // rules 9/10: brand only
+      if (!b0 || o.weakBrand || bpos > 3 || bpos < 0 || !e.ctext.includes(o.bcompact)) return { s: 0 };
+      // brand alone is only accepted when the salvaging product type is recognisable and fits the orphan category
+      if (!(e.fam.size && o.allow && [...e.fam].some(f => o.allow.has(f)))) return { s: 0 };
+      s = 0.72 * b + (e.fam.size && o.allow && [...e.fam].some(f => o.allow.has(f)) ? 0.07 : 0) + ((df.get(o.btoks[0]) || 0) < 15 ? 0.05 : 0);
+      s = Math.min(s, 0.84); basis = 'Brand only (' + o.brandSrc + ')';
+    } else { // rule 11: description only
+      s = d.s; basis = 'Description only';
+      // the shared words must describe the product itself (appear early in the salvaging title), not a passing mention
+      const early = new Set(e.toks.slice(0, 6));
+      if (!o.specific.some(t => early.has(t))) s = Math.min(s, 0.6);
+      else if (d.specHit >= 3) { /* full strength */ }
+      else if (d.specHit === 2) s = Math.min(s, 0.80);
+      else s = Math.min(s, 0.6);   // a single generic noun with no brand cannot identify a shipment
+    }
+    if (o.models.length && !o.models.some(m => new RegExp('(^|\\D)' + m + '(\\D|$)').test(e.ntext))) { s *= 0.85; basis += '; model/number in orphan desc not found'; }
+    const g = gate(o, e); if (g) return { s: 0, reject: g, rs: s };
+    return { s, b: b0, d: d.s, specHit: d.specHit, basis };
+  }
+
+  function candidates(o, scope) {
+    const keys = [...new Set([...o.btoks, ...o.dt])];
+    const lists = [];
+    for (const t of keys) {
+      const a = scope === 'site' ? siteIdx.get(o.site + '|' + t) : crossIdx.get(t);
+      if (a && a.length) lists.push({ t, a, w: idf(t) * (o.btoks.includes(t) ? 2 : GENERIC.has(t) ? 0.3 : 1) });
+    }
+    if (!lists.length) return [];
+    const acc = new Map();
+    lists.sort((x, y) => x.a.length - y.a.length);
+    for (const L of lists) { if (L.a.length > 25000 && acc.size > 50) continue; for (const i of L.a) acc.set(i, (acc.get(i) || 0) + L.w); }
+    // if orphan has a brand, a candidate must contain at least one brand token, unless desc-only path is possible
+    let arr = [...acc.entries()];
+    arr.sort((x, y) => y[1] - x[1]);
+    return arr.slice(0, CFG.MAX_SCORE_CANDS).map(x => x[0]);
+  }
+
+  /* ---- generate candidate pairs ---- */
+  const pairs = []; const unmatchedReason = new Array(O.length).fill('');
+  const excluded = new Array(O.length).fill(false);
+  for (let k = 0; k < O.length; k++) {
+    if (k % 250 === 0) progress(0.12 + 0.75 * k / O.length, 'Matching orphans… ' + k.toLocaleString() + ' / ' + O.length.toLocaleString());
+    const o = O[k];
+    if (!o.brand && !o.descRaw) { excluded[k] = true; unmatchedReason[k] = 'Excluded — no brand and no product description'; continue; }
+    if (!o.brand && !o.specific.length) { excluded[k] = true; unmatchedReason[k] = 'Excluded — description too generic to identify (e.g. packaging only) and no brand'; continue; }
+    const found = []; let bestReject = null, bestCrossLow = null;
+    const scopes = [];
+    if (salvSites.has(o.site)) scopes.push('site'); scopes.push('cross');
+    for (const scope of scopes) {
+      for (const i of candidates(o, scope)) {
+        const e = pool[i];
+        const same = e.site === o.site;
+        if (scope === 'cross' && same) continue;
+        const r = score(o, e);
+        if (r.reject) { if (r.rs >= CFG.MIN && (!bestReject || r.rs > bestReject.s)) bestReject = { s: r.rs, why: r.reject }; continue; }
+        if (r.s < CFG.MIN) continue;
+        const exact = r.s >= CFG.EXACT;
+        if (!same) { // cross-site: near-exact + description evidence + age > 20
+          if (r.s < CFG.CROSS_MIN || !o.dt.length || r.specHit < 2 || (o.brand && !r.b)) continue;
+          if (!(e.age > CFG.CROSS_AGE)) { bestCrossLow = 'Cross-site candidate ageing ≤ 20 days'; continue; }
+        }
+        let tier;
+        if (!e.isCombo) tier = same ? (exact ? (e.ptype === 'FLOOR' ? 1 : 2) : (e.ptype === 'FLOOR' ? 7 : 8)) : (e.ptype === 'FLOOR' ? 3 : 4);
+        else tier = same ? (exact ? 5 : 9) : 6;
+        const ageOk = e.ptype === 'FLOOR' ? (o.age != null && e.age != null && o.age < e.age) : true;
+        found.push({ o: k, e: i, s: r.s, tier, ageOk, same, basis: r.basis, gap: (o.age != null && e.age != null) ? Math.abs(e.age - o.age) : 999 });
+      }
+    }
+    found.sort(cmp);
+    const seen = new Set();
+    for (const f of found) { const key = pool[f.e].useKey; if (seen.has(key)) continue; seen.add(key); pairs.push(f); if (seen.size >= CFG.TOPK) break; }
+    if (!found.length) unmatchedReason[k] = bestReject ? 'No valid match — best candidate (' + Math.round(bestReject.s * 100) + '%) rejected: ' + bestReject.why : bestCrossLow || 'No candidate at or above 70% in salvaging or combo base';
+  }
+  function cmp(a, b) {
+    return a.tier - b.tier || (b.ageOk - a.ageOk) || (b.s - a.s) || (pool[b.e].mrank - pool[a.e].mrank) || (a.gap - b.gap);
+  }
+
+  /* ---- one-to-one greedy assignment ---- */
+  progress(0.9, 'Resolving one-to-one assignment…');
+  pairs.sort(cmp);
+  const usedKey = new Set(); const assigned = new Array(O.length).fill(null);
+  for (const p of pairs) {
+    if (assigned[p.o]) continue; const e = pool[p.e]; if (usedKey.has(e.useKey)) continue;
+    usedKey.add(e.useKey); assigned[p.o] = p;
+  }
+  for (let k = 0; k < O.length; k++) if (!assigned[k] && !unmatchedReason[k]) unmatchedReason[k] = 'Candidates found but each was assigned to a stronger orphan match';
+
+  /* ---- combo remarks ---- */
+  const comboHits = new Map();
+  assigned.forEach(p => { if (p && pool[p.e].isCombo) { const a = pool[p.e].awb; comboHits.set(a, (comboHits.get(a) || 0) + 1); } });
+
+  /* ---- output ---- */
+  progress(0.96, 'Preparing results…');
+  const results = [], notMatched = [];
+  for (let k = 0; k < O.length; k++) {
+    const o = O[k], p = assigned[k], r = o.r;
+    if (!p) { notMatched.push(Object.assign({}, r, { 'REASON': unmatchedReason[k] })); continue; }
+    const e = pool[p.e];
+    const notes = [p.basis];
+    if (e.ptype === 'FLOOR' && !p.ageOk) notes.push('Floor ageing rule not met (orphan ageing ≥ salvaging)');
+    if (e.bundle && !e.isCombo) notes.push('Pack/bundle in salvaging desc — verify quantity');
+    let comboRemark = '';
+    if (e.isCombo) {
+      const n = comboHits.get(e.awb) || 0;
+      comboRemark = n >= 2 ? (n === e.compCount ? 'COMBO — all ' + n + ' of ' + e.compCount + ' items matched' : 'COMBO — ' + n + ' of ' + e.compCount + ' items matched')
+        : 'COMBO — partial (1 of ' + e.compCount + ' items) — manual review';
+    }
+    results.push({
+      'BARCODE': oc.barcode ? (r[oc.barcode] == null ? '' : r[oc.barcode]) : '',
+      'SITE NAME (ORPHAN)': o.siteRaw, 'AGEING (ORPHAN)': o.age == null ? '' : o.age,
+      'AWB': e.awb, 'AGEING': e.age == null ? '' : e.age,
+      'DC Liability (Salvaging)': e.siteRaw == null ? '' : e.siteRaw,
+      'Match Type': p.same ? 'Same-site' : 'Cross-site',
+      'Age': (o.age != null && e.age != null) ? e.age - o.age : '',
+      'COMBO REMARKS': comboRemark,
+      'Orphan Category': r[oc.category] == null ? '' : r[oc.category],
+      'Orphan Description': o.descRaw || ('[Brand only] ' + (o.brandSrc === 'Entered Brand' ? r[oc.entered] : r[oc.brand])),
+      'Salvaging Description': e.desc,
+      'Brand image url': oc.brandImg ? (r[oc.brandImg] || '') : '',
+      'tag image': oc.tagImg ? (r[oc.tagImg] || '') : '',
+      'Pendency Type': e.ptype, 'Picked Month': e.month || '',
+      'Confidence': p.s >= CFG.EXACT ? 'Exact' : 'Similar', 'Match Score %': Math.round(p.s * 100),
+      'Notes': notes.join('; '),
+      _tier: p.tier, _brand: o.brand, _back: oc.backImg ? (r[oc.backImg] || '') : ''
+    });
+  }
+  results.sort((a, b) => a._tier - b._tier || b['Match Score %'] - a['Match Score %']);
+  progress(1, 'Done');
+  return {
+    results, notMatched,
+    stats: { orphans: O.length, salvaging: salvByAwb.size, comboAwbs: comboGroups.size, matched: results.length, excluded: excluded.filter(Boolean).length,
+      floorRule: sc.ptype ? 'PENDENCY TYPE column' : 'derived from Loss Bucket Sub Tagging ("Floor…" = FLOOR, else LOSS)',
+      unmappedSites: [...new Set(O.filter(o => !salvSites.has(o.site)).map(o => o.siteRaw))] }
+  };
+}
+
+
+
+</script>
+<script>
+(function () {
+  const $ = id => document.getElementById(id);
+  const MB = 1024 * 1024, LIMIT = 200 * MB, PAGE = 100;
+  const COLS = ['BARCODE', 'SITE NAME (ORPHAN)', 'AGEING (ORPHAN)', 'AWB', 'AGEING', 'DC Liability (Salvaging)', 'Match Type', 'Age', 'COMBO REMARKS',
+    'Orphan Category', 'Orphan Description', 'Salvaging Description', 'Brand image url', 'tag image'];
+  const EXTRA = ['Pendency Type', 'Picked Month', 'Confidence', 'Match Score %', 'Visual Confirmation (Y/N)', 'Notes'];
+  const HEAD_TIPS = { 'AGEING': 'Salvaging max_ageing (days)', 'Age': 'Ageing gap = salvaging ageing − orphan ageing (days)' };
+  const files = { o: null, s: null };
+  let data = null, view = 'm', page = 0, filtered = [];
+  const visual = new Map();
+
+  const EXAMPLE = [{"BARCODE": "", "SITE NAME (ORPHAN)": "Bangalore DC", "AGEING (ORPHAN)": 21, "AWB": "SF3463810687F", "AGEING": 24, "DC Liability (Salvaging)": "Bangalore DC", "Match Type": "Same-site", "Age": 3, "COMBO REMARKS": "", "Orphan Category": "Home & Kitchen", "Orphan Description": "Phenyl Jasmine Phenyl Floor Cleaner", "Salvaging Description": "sashti PHENYL FLOOR CLEANER - JASMINE", "Brand image url": "https://drive.google.com/uc?export=view&id=1YcXUOE9KzElebjCgTs45Mr_Uvmd1G1TU", "tag image": "https://drive.google.com/uc?export=view&id=1GFh4HhyHlO6sQqPqnRGjmpCiMfc-QnBu", "Pendency Type": "FLOOR", "Picked Month": "Aug", "Confidence": "Exact", "Match Score %": 100, "Notes": "Brand + Description", "_tier": 1, "_brand": "sashti", "_back": "https://drive.google.com/uc?export=view&id=17uC6UxOUHZhLYgk1Kn0WL4x4RXg-eboV"}, {"BARCODE": "", "SITE NAME (ORPHAN)": "Bangalore DC", "AGEING (ORPHAN)": 35, "AWB": "SF3855548136ZIP", "AGEING": 30, "DC Liability (Salvaging)": "Bangalore DC", "Match Type": "Same-site", "Age": -5, "COMBO REMARKS": "", "Orphan Category": "Personal Care", "Orphan Description": "Skin Glowing Face Wash", "Salvaging Description": "Kapoor Bar skin glowing face wash ( Buy 1 Get 1 Free)", "Brand image url": "https://drive.google.com/uc?export=view&id=1Y5wCk5F2CISP18GX-8-tApLwAZ3oh6iv", "tag image": "", "Pendency Type": "LOSS", "Picked Month": "Aug", "Confidence": "Exact", "Match Score %": 100, "Notes": "Brand + Description", "_tier": 2, "_brand": "kapoor bar", "_back": ""}, {"BARCODE": "", "SITE NAME (ORPHAN)": "Kolkata DC", "AGEING (ORPHAN)": 38, "AWB": "SF3317331567F", "AGEING": 88, "DC Liability (Salvaging)": "Lucknow DC", "Match Type": "Cross-site", "Age": 50, "COMBO REMARKS": "", "Orphan Category": "Personal Care", "Orphan Description": "White Glow 3 in 1 Deep Cleansing Skin Whitening Facial Foam", "Salvaging Description": "LOTUS Herbals White Glow 3 In 1 Deep Cleansing Skin Whitening Facial Foam 100 G 100 g", "Brand image url": "https://drive.google.com/uc?export=view&id=1vKtu88UPzgcUeY6laRsH1OQgLXTtzTU6", "tag image": "https://drive.google.com/uc?export=view&id=10oeNozQLFntXs3hpvk1HEW-YbvaNLmvq", "Pendency Type": "FLOOR", "Picked Month": "Jun", "Confidence": "Exact", "Match Score %": 100, "Notes": "Brand + Description", "_tier": 3, "_brand": "lotus herbals", "_back": ""}, {"BARCODE": "", "SITE NAME (ORPHAN)": "Kolkata 2 DC", "AGEING (ORPHAN)": 33, "AWB": "SF3906116296GOK", "AGEING": 22, "DC Liability (Salvaging)": "Kolkata 2 DC", "Match Type": "Same-site", "Age": -11, "COMBO REMARKS": "COMBO — partial (1 of 2 items) — manual review", "Orphan Category": "Personal Care", "Orphan Description": "CREAM OF COCO SOAP", "Salvaging Description": "Cream of Coco Soap Pack of 1", "Brand image url": "https://drive.google.com/uc?export=view&id=1tdWVUJQFnTADqCAUwYiRbSUrrSwwa2O_", "tag image": "https://drive.google.com/uc?export=view&id=1NzM_uY9n4eytPOHyFsupfcc1M33Iym9E", "Pendency Type": "FLOOR", "Picked Month": "Aug", "Confidence": "Exact", "Match Score %": 100, "Notes": "Description only; Floor ageing rule not met (orphan ageing ≥ salvaging)", "_tier": 5, "_brand": "", "_back": ""}, {"BARCODE": "", "SITE NAME (ORPHAN)": "OneNCR DC", "AGEING (ORPHAN)": 33, "AWB": "R2164610682NYA", "AGEING": 79, "DC Liability (Salvaging)": "OneNCR DC", "Match Type": "Same-site", "Age": 46, "COMBO REMARKS": "", "Orphan Category": "Footwear", "Orphan Description": "NEEMAN'S", "Salvaging Description": "Neeman's Ivory Classic Knit Neutrals Sneakers (UK 8)", "Brand image url": "https://drive.google.com/uc?export=view&id=1iYUI_KVSgQGj0npJEed8tvVpMWUcacve", "tag image": "https://drive.google.com/uc?export=view&id=1S2yr2IRzEvH_SI1ujP79kxBqurYiVjOS", "Pendency Type": "FLOOR", "Picked Month": "Jun", "Confidence": "Similar", "Match Score %": 84, "Notes": "Brand only (Brand)", "_tier": 7, "_brand": "neeman s", "_back": ""}, {"BARCODE": "", "SITE NAME (ORPHAN)": "NCR Bilaspur DC", "AGEING (ORPHAN)": 23, "AWB": "SF4041810952FPL", "AGEING": 10, "DC Liability (Salvaging)": "NCR Bilaspur DC", "Match Type": "Same-site", "Age": -13, "COMBO REMARKS": "", "Orphan Category": "Personal Care", "Orphan Description": "Kesh Kanti Anti Dandruff Hair Cleanser", "Salvaging Description": "Patanjali SN KESH KANTI ALOEVERA HAIR CLEANSER 180 ML (Pack of 3)", "Brand image url": "https://drive.google.com/uc?export=view&id=13pobh-rS3UrarsEckBY85YjgOTRic7-7", "tag image": "", "Pendency Type": "LOSS", "Picked Month": "-", "Confidence": "Similar", "Match Score %": 85, "Notes": "Brand + Description; Pack/bundle in salvaging desc — verify quantity", "_tier": 8, "_brand": "patanjali", "_back": ""}];
+
+  /* ---------- uploads ---------- */
+  function bindBay(k) {
+    const bay = $('bay-' + k), inp = $('file-' + k);
+    inp.addEventListener('change', () => setFile(k, inp.files[0]));
+    ['dragenter', 'dragover'].forEach(ev => bay.addEventListener(ev, e => { e.preventDefault(); bay.classList.add('drag'); }));
+    ['dragleave', 'drop'].forEach(ev => bay.addEventListener(ev, e => { e.preventDefault(); bay.classList.remove('drag'); }));
+    bay.addEventListener('drop', e => { const f = e.dataTransfer.files[0]; if (f) setFile(k, f); });
+  }
+  function setFile(k, f) {
+    hideErr();
+    if (!f) return;
+    if (f.size > LIMIT) { showErr(f.name + ' is ' + (f.size / MB).toFixed(1) + ' MB. The limit is 200 MB per file; split the file or remove unused sheets and try again.'); return; }
+    files[k] = f;
+    $('bay-' + k).classList.add('ok');
+    $('f-' + k).textContent = f.name + ' · ' + (f.size / MB).toFixed(1) + ' MB';
+    const ready = files.o && files.s;
+    $('go').disabled = !ready;
+    $('go-hint').textContent = ready ? 'Large files take a minute to process' : 'Add both files to start';
+  }
+  bindBay('o'); bindBay('s');
+
+  function showErr(m) { $('err').textContent = m; $('err').hidden = false; }
+  function hideErr() { $('err').hidden = true; }
+  function prog(p, t) { $('prog').hidden = false; $('prog-f').style.width = Math.round(p * 100) + '%'; $('prog-p').textContent = Math.round(p * 100) + '%'; if (t) $('prog-t').textContent = t; }
+
+  /* ---------- run (Web Worker, main-thread fallback) ---------- */
+  const WORKER_SRC = [
+    "try { importScripts('https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js'); } catch (e) { self.postMessage({ type: 'nolib' }); }",
+    document.getElementById('engine').textContent,
+    readBooks.toString(),
+    "self.onmessage = async function (ev) { try {",
+    "  var p = function (v, t) { self.postMessage({ type: 'p', v: v, t: t }); };",
+    "  var books = await readBooks(ev.data.o, ev.data.s, p, XLSX);",
+    "  p(0.1, 'Matching…');",
+    "  var res = runMatch(books.orph, books.salv, books.combo, function (v, t) { p(0.1 + v * 0.9, t); });",
+    "  res.stats.sheets = books.sheets; self.postMessage({ type: 'done', res: res });",
+    "} catch (e) { self.postMessage({ type: 'err', msg: (e && e.message) || String(e) }); } };"
+  ].join('\n');
+
+  async function readBooks(fo, fs, p, X) {
+    const opt = { type: 'array', dense: true, cellDates: false, cellNF: false, cellStyles: false };
+    p(0.01, 'Reading Orphan Base…');
+    const ob = X.read(await fo.arrayBuffer(), opt);
+    const oName = ob.SheetNames.find(n => /orphan/i.test(n)) || ob.SheetNames[0];
+    const orph = X.utils.sheet_to_json(ob.Sheets[oName], { defval: '' });
+    p(0.04, 'Reading Salvaging Base (' + Math.round(fs.size / 1048576) + ' MB)…');
+    const sb = X.read(await fs.arrayBuffer(), opt);
+    const sName = sb.SheetNames.find(n => /salvag/i.test(n)) || sb.SheetNames.find(n => !/combo/i.test(n)) || sb.SheetNames[0];
+    const cName = sb.SheetNames.find(n => /combo/i.test(n));
+    const salv = X.utils.sheet_to_json(sb.Sheets[sName], { defval: '' });
+    const combo = cName ? X.utils.sheet_to_json(sb.Sheets[cName], { defval: '' }) : [];
+    if (!orph.length) throw new Error('The Orphan Base sheet "' + oName + '" has no rows.');
+    if (!salv.length) throw new Error('The Salvaging Base sheet "' + sName + '" has no rows.');
+    return { orph, salv, combo, sheets: { orphan: oName, salvaging: sName, combo: cName || '(none found)' } };
+  }
+
+  $('go').addEventListener('click', () => {
+    hideErr(); $('go').disabled = true; prog(0, 'Starting…');
+    let worker;
+    try { worker = new Worker(URL.createObjectURL(new Blob([WORKER_SRC], { type: 'text/javascript' }))); }
+    catch (e) { return runMain(); }
+    let noLib = false;
+    worker.onmessage = ev => {
+      const m = ev.data;
+      if (m.type === 'nolib') { noLib = true; worker.terminate(); runMain(); }
+      else if (m.type === 'p') prog(m.v, m.t);
+      else if (m.type === 'done') { worker.terminate(); finish(m.res); }
+      else if (m.type === 'err') { worker.terminate(); fail(m.msg); }
+    };
+    worker.onerror = e => { e.preventDefault(); worker.terminate(); if (!noLib) runMain(); };
+    worker.postMessage({ o: files.o, s: files.s });
+  });
+
+  async function runMain() {
+    try {
+      prog(0.01, 'Processing on this tab (the page may pause briefly)…');
+      await new Promise(r => setTimeout(r, 50));
+      const books = await readBooks(files.o, files.s, prog, window.XLSX);
+      await new Promise(r => setTimeout(r, 30));
+      const res = runMatch(books.orph, books.salv, books.combo, (v, t) => prog(0.1 + v * 0.9, t));
+      res.stats.sheets = books.sheets; finish(res);
+    } catch (e) { fail(e.message || String(e)); }
+  }
+  function fail(msg) { $('prog').hidden = true; $('go').disabled = false; showErr('Matching stopped: ' + msg); }
+
+  function finish(res) {
+    data = res; visual.clear(); page = 0;
+    prog(1, 'Done · ' + res.results.length.toLocaleString() + ' matches from ' + res.stats.orphans.toLocaleString() + ' orphan rows');
+    $('go').disabled = false; $('ex-tag').hidden = true;
+    $('dl-csv').disabled = false; $('dl-xlsx').disabled = false;
+    const sites = [...new Set(res.results.map(r => r['SITE NAME (ORPHAN)']).concat(res.notMatched.map(r => Object.values(r)[0])))].filter(Boolean).sort();
+    $('f-site').innerHTML = '<option value="">All orphan sites</option>' + sites.map(s => '<option>' + esc(s) + '</option>').join('');
+    if (res.stats.unmappedSites && res.stats.unmappedSites.length)
+      $('info').hidden = false, $('info').textContent = ('No same-name DC in the Salvaging Base for: ' + res.stats.unmappedSites.join(', ') + '. These orphans were checked cross-site only. Add the mapping in SITE_ALIASES if they go by another name.');
+    else $('info').hidden = true;
+    renderKpis(); applyFilters();
+  }
+
+  /* ---------- KPIs ---------- */
+  function renderKpis() {
+    const R = data ? data.results : EXAMPLE, st = data ? data.stats : null;
+    const c = f => R.filter(f).length;
+    const total = st ? st.orphans : R.length;
+    const eligible = st ? st.orphans - st.excluded : R.length;
+    const combos = new Set(R.filter(r => r['COMBO REMARKS']).map(r => r.AWB)).size;
+    const k = [
+      ['Matched', R.length.toLocaleString(), (eligible ? Math.round(R.length / eligible * 100) : 0) + '% of identifiable orphans', 'hero'],
+      ['Orphan rows', total.toLocaleString(), st ? st.excluded.toLocaleString() + ' excluded (no brand / description)' : 'example'],
+      ['Same-site', c(r => r['Match Type'] === 'Same-site').toLocaleString(), c(r => r['Match Type'] === 'Same-site' && r['Pendency Type'] === 'FLOOR').toLocaleString() + ' on FLOOR'],
+      ['Cross-site', c(r => r['Match Type'] === 'Cross-site').toLocaleString(), 'ageing > 20 days, near-exact'],
+      ['Exact (85%+)', c(r => r.Confidence === 'Exact').toLocaleString(), c(r => r.Confidence === 'Similar').toLocaleString() + ' similar (70–84%)'],
+      ['Combo AWBs', combos.toLocaleString(), c(r => r['COMBO REMARKS']).toLocaleString() + ' orphan rows'],
+      ['Not matched', (data ? data.notMatched.length : 0).toLocaleString(), st ? 'Salvaging ' + st.salvaging.toLocaleString() + ' AWBs scanned' : '—']
+    ];
+    $('kpis').innerHTML = k.map(x => '<div class="kpi ' + (x[3] || '') + '"><div class="kpi-k">' + x[0] + '</div><div class="kpi-v">' + x[1] + '</div><div class="kpi-s">' + esc(x[2]) + '</div></div>').join('');
+    $('n-m').textContent = R.length.toLocaleString(); $('n-n').textContent = (data ? data.notMatched.length : 0).toLocaleString();
+  }
+
+  /* ---------- filtering + table ---------- */
+  ['q', 'f-type', 'f-pt', 'f-conf', 'f-combo', 'f-site'].forEach(id => $(id).addEventListener('input', () => { page = 0; applyFilters(); }));
+  $('tab-m').addEventListener('click', () => setView('m')); $('tab-n').addEventListener('click', () => setView('n'));
+  function setView(v) { view = v; page = 0; $('tab-m').setAttribute('aria-selected', v === 'm'); $('tab-n').setAttribute('aria-selected', v === 'n');
+    ['f-type', 'f-pt', 'f-conf', 'f-combo'].forEach(id => $(id).hidden = v === 'n'); applyFilters(); }
+  $('pg-prev').addEventListener('click', () => { if (page > 0) { page--; renderTable(); } });
+  $('pg-next').addEventListener('click', () => { if ((page + 1) * PAGE < filtered.length) { page++; renderTable(); } });
+
+  function applyFilters() {
+    const q = $('q').value.trim().toLowerCase(), site = $('f-site').value;
+    if (view === 'm') {
+      const t = $('f-type').value, pt = $('f-pt').value, cf = $('f-conf').value, cb = $('f-combo').value;
+      filtered = (data ? data.results : EXAMPLE).filter(r =>
+        (!t || r['Match Type'] === t) && (!pt || r['Pendency Type'] === pt) && (!cf || r.Confidence === cf) &&
+        (!cb || (cb === 'combo' ? !!r['COMBO REMARKS'] : !r['COMBO REMARKS'])) && (!site || r['SITE NAME (ORPHAN)'] === site) &&
+        (!q || [r.AWB, r.BARCODE, r['Orphan Description'], r['Salvaging Description'], r._brand, r['DC Liability (Salvaging)']].join(' ').toLowerCase().includes(q)));
+    } else {
+      filtered = (data ? data.notMatched : []).filter(r => (!site || Object.values(r)[0] === site) && (!q || Object.values(r).join(' ').toLowerCase().includes(q)));
+    }
+    renderTable();
+  }
+
+  function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
+  function thumbCell(url, idx, which) {
+    const id = driveId(url);
+    if (!id) return '<td><span class="none">—</span></td>';
+    return '<td><button class="thumb" data-i="' + idx + '" data-w="' + which + '" aria-label="View ' + which + ' image"><img loading="lazy" referrerpolicy="no-referrer" alt="" src="https://drive.google.com/thumbnail?id=' + id + '&sz=w200" onerror="this.replaceWith(Object.assign(document.createElement(\'span\'),{className:\'fb\',textContent:\'Open image\'}))"></button></td>';
+  }
+  function renderTable() {
+    const start = page * PAGE, rows = filtered.slice(start, start + PAGE);
+    if (view === 'm') {
+      $('th').innerHTML = '<tr>' + COLS.concat(EXTRA).concat(['Verify']).map(c => '<th' + (HEAD_TIPS[c] ? ' title="' + HEAD_TIPS[c] + '"' : '') + '>' + esc(c) + '</th>').join('') + '</tr>';
+      $('tb').innerHTML = rows.map((r, j) => {
+        const i = start + j, v = visual.get(r) || '';
+        const combo = r['COMBO REMARKS'] ? '<span class="pill p-combo' + (/all /.test(r['COMBO REMARKS']) ? ' full' : '') + '">' + esc(r['COMBO REMARKS']) + '</span>' : '<span class="none">—</span>';
+        return '<tr class="conf-' + r.Confidence.toLowerCase() + '">' +
+          '<td class="mono">' + (r.BARCODE !== '' ? esc(r.BARCODE) : '<span class="none">—</span>') + '</td>' +
+          '<td>' + esc(r['SITE NAME (ORPHAN)']) + '</td><td class="num">' + esc(r['AGEING (ORPHAN)']) + '</td>' +
+          '<td class="mono"><b>' + esc(r.AWB) + '</b></td><td class="num">' + esc(r.AGEING) + '</td>' +
+          '<td>' + esc(r['DC Liability (Salvaging)']) + '</td>' +
+          '<td><span class="pill ' + (r['Match Type'] === 'Same-site' ? 'p-same' : 'p-cross') + '">' + r['Match Type'] + '</span></td>' +
+          '<td class="num">' + esc(r.Age) + '</td><td>' + combo + '</td>' +
+          '<td>' + esc(r['Orphan Category']) + '</td><td class="desc">' + esc(r['Orphan Description']) + '</td><td class="desc">' + esc(r['Salvaging Description']) + '</td>' +
+          thumbCell(r['Brand image url'], i, 'brand') + thumbCell(r['tag image'], i, 'tag') +
+          '<td><span class="pill ' + (r['Pendency Type'] === 'FLOOR' ? 'p-floor' : 'p-loss') + '">' + r['Pendency Type'] + '</span></td>' +
+          '<td>' + esc(r['Picked Month']) + '</td>' +
+          '<td><span class="pill ' + (r.Confidence === 'Exact' ? 'p-exact' : 'p-similar') + '">' + r.Confidence + '</span></td>' +
+          '<td><div class="score"><span class="num">' + r['Match Score %'] + '%</span><span class="score-bar"><i style="width:' + r['Match Score %'] + '%"></i></span></div></td>' +
+          '<td><select class="vis ' + (v === 'Y' ? 'y' : v === 'N' ? 'n' : '') + '" data-i="' + i + '" aria-label="Visual confirmation"><option value="">—</option><option' + (v === 'Y' ? ' selected' : '') + '>Y</option><option' + (v === 'N' ? ' selected' : '') + '>N</option></select></td>' +
+          '<td class="note">' + esc(r.Notes) + '</td>' +
+          '<td><a target="_blank" rel="noopener" href="https://www.google.com/search?tbm=isch&q=' + encodeURIComponent(String(r['Salvaging Description']).slice(0, 120)) + '">Verify ↗</a></td></tr>';
+      }).join('') || '<tr><td colspan="21" class="none" style="padding:24px">No matches for these filters.</td></tr>';
+    } else {
+      const heads = filtered.length ? Object.keys(filtered[0]) : (data && data.notMatched[0] ? Object.keys(data.notMatched[0]) : ['REASON']);
+      $('th').innerHTML = '<tr>' + heads.map(h => '<th>' + esc(h) + '</th>').join('') + '</tr>';
+      $('tb').innerHTML = rows.map(r => '<tr>' + heads.map(h => {
+        const v = r[h]; const id = /image/i.test(h) ? driveId(v) : '';
+        return id ? '<td><a target="_blank" rel="noopener" href="https://drive.google.com/file/d/' + id + '/view">Open ↗</a></td>' : '<td' + (h === 'REASON' ? ' class="note"' : '') + '>' + esc(v) + '</td>';
+      }).join('') + '</tr>').join('') || '<tr><td class="none" style="padding:24px">' + (data ? 'Nothing here for these filters.' : 'Run matching to list unmatched orphans with a reason for each.') + '</td></tr>';
+    }
+    $('pg-info').textContent = filtered.length ? 'Rows ' + (start + 1).toLocaleString() + '–' + Math.min(start + PAGE, filtered.length).toLocaleString() + ' of ' + filtered.length.toLocaleString() : '0 rows';
+    $('pg-prev').disabled = page === 0; $('pg-next').disabled = (page + 1) * PAGE >= filtered.length;
+  }
+
+  $('tb').addEventListener('change', e => {
+    const s = e.target.closest('select.vis'); if (!s) return;
+    const r = filtered[+s.dataset.i]; visual.set(r, s.value); s.className = 'vis ' + (s.value === 'Y' ? 'y' : s.value === 'N' ? 'n' : '');
+  });
+
+  /* ---------- lightbox ---------- */
+  $('tb').addEventListener('click', e => {
+    const b = e.target.closest('.thumb'); if (!b) return;
+    const r = filtered[+b.dataset.i];
+    $('lb-k').textContent = r['SITE NAME (ORPHAN)'] + ' → ' + r['DC Liability (Salvaging)'] + ' · ' + r['Match Type'] + ' · ' + r['Match Score %'] + '%';
+    $('lb-t').textContent = 'AWB ' + r.AWB;
+    const imgs = [['Brand image', r['Brand image url']], ['Tag image', r['tag image']], ['Back image', r._back]].filter(x => driveId(x[1]));
+    $('lb-imgs').innerHTML = imgs.map(x => { const id = driveId(x[1]);
+      return '<div class="lb-img"><img referrerpolicy="no-referrer" alt="' + x[0] + '" src="https://drive.google.com/thumbnail?id=' + id + '&sz=w1000" onerror="this.replaceWith(Object.assign(document.createElement(\'div\'),{className:\'fb\',textContent:\'Image could not load here. Use Open in Drive.\'}))"><div class="cap"><span>' + x[0] + '</span><a target="_blank" rel="noopener" href="https://drive.google.com/file/d/' + id + '/view">Open in Drive ↗</a></div></div>'; }).join('');
+    $('lb-cmp').innerHTML = '<div><b>Orphan · ' + esc(r['Orphan Category']) + '</b>' + esc(r['Orphan Description']) + '</div><div><b>Salvaging · ' + esc(r['Pendency Type']) + ' · ageing ' + esc(r.AGEING) + '</b>' + esc(r['Salvaging Description']) + '</div>';
+    $('lb').hidden = false; $('lb-x').focus();
+  });
+  $('lb-x').addEventListener('click', () => $('lb').hidden = true);
+  $('lb').addEventListener('click', e => { if (e.target.id === 'lb') $('lb').hidden = true; });
+  document.addEventListener('keydown', e => { if (e.key === 'Escape') $('lb').hidden = true; });
+
+  /* ---------- export ---------- */
+  function exportRows(list) {
+    return list.map(r => { const o = {}; COLS.concat(EXTRA).forEach(c => o[c] = c === 'Visual Confirmation (Y/N)' ? (visual.get(r) || '') : r[c]); return o; });
+  }
+  function stamp() { const d = new Date(); return d.getFullYear() + String(d.getMonth() + 1).padStart(2, '0') + String(d.getDate()).padStart(2, '0') + '_' + String(d.getHours()).padStart(2, '0') + String(d.getMinutes()).padStart(2, '0'); }
+  async function save(filename, blob) {
+    try {
+      if (window.claude && window.claude.use) {
+        const dl = await window.claude.use('downloads');
+        if (dl) { try { await dl.save({ filename, data: blob }); } catch (e) { if (e && e.code !== 'declined') showErr('Download did not start: ' + (e.message || e.code)); } return; }
+      }
+    } catch (e) { /* fall through to a normal browser download */ }
+    const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = filename; document.body.appendChild(a); a.click();
+    setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1500);
+  }
+  $('dl-xlsx').addEventListener('click', () => {
+    if (!data) return;
+    const wb = XLSX.utils.book_new();
+    const all = exportRows(data.results);
+    const ws = XLSX.utils.json_to_sheet(all, { header: COLS.concat(EXTRA) });
+    ws['!cols'] = COLS.concat(EXTRA).map(c => ({ wch: /Description|Notes|COMBO/.test(c) ? 48 : /image/i.test(c) ? 30 : 16 }));
+    ws['!autofilter'] = { ref: ws['!ref'] };
+    XLSX.utils.book_append_sheet(wb, ws, 'Matches');
+    const combo = all.filter(r => r['COMBO REMARKS']);
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(combo.length ? combo : [{ Note: 'No combo shipments matched' }]), 'Combo Shipment Matches');
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(data.notMatched.length ? data.notMatched : [{ Note: 'Every orphan was matched' }]), 'Not Matched');
+    const st = data.stats;
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([
+      ['Run summary', ''], ['Orphan rows', st.orphans], ['Excluded (no brand/description or packaging only)', st.excluded], ['Matched', st.matched],
+      ['Salvaging AWBs scanned', st.salvaging], ['Combo AWBs in COMBO BASE', st.comboAwbs], ['FLOOR / LOSS source', st.floorRule],
+      ['Sheets used', 'Orphan: ' + st.sheets.orphan + ' · Salvaging: ' + st.sheets.salvaging + ' · Combo: ' + st.sheets.combo],
+      ['Thresholds', 'Exact ≥ 85%, Similar 70–84%, Cross-site ≥ 90% and ageing > 20 days'],
+      ['AGEING column', 'Salvaging max_ageing'], ['Age column', 'Salvaging ageing − Orphan ageing (days)']]), 'Run Summary');
+    const out = XLSX.write(wb, { bookType: 'xlsx', type: 'array', compression: true });
+    save('Orphan_Salvaging_Matches_' + stamp() + '.xlsx', new Blob([out], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }));
+  });
+  $('dl-csv').addEventListener('click', () => {
+    if (!data) return;
+    const rows = view === 'm' ? exportRows(filtered) : filtered;
+    const csv = XLSX.utils.sheet_to_csv(XLSX.utils.json_to_sheet(rows));
+    save((view === 'm' ? 'Orphan_Matches_' : 'Orphan_Not_Matched_') + stamp() + '.csv', new Blob(['﻿' + csv], { type: 'text/csv' }));
+  });
+
+  renderKpis(); applyFilters();
+})();
+</script>
