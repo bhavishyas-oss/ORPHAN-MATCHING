@@ -227,18 +227,19 @@ footer{margin-top:28px;padding-top:12px;border-top:1px solid var(--line);color:v
     <summary>Matching logic applied</summary>
     <div class="rules-grid">
       <div>
-        <h3>Priority ladder (first match wins, one AWB per orphan)</h3>
+        <h3>Strict priority (one AWB per orphan; a higher level always wins)</h3>
         <ol class="ladder">
-          <li>Same site · FLOOR pendency · exact (orphan ageing &lt; salvaging ageing preferred)</li>
-          <li>Same site · LOSS pendency · exact</li>
-          <li>Cross-site · FLOOR · near-exact, salvaging ageing &gt; 20 days</li>
-          <li>Cross-site · LOSS · near-exact, salvaging ageing &gt; 20 days</li>
-          <li>Combo Base · same site · exact (each combo item matched to a different orphan)</li>
-          <li>Combo Base · cross-site · near-exact, ageing &gt; 20 days</li>
-          <li>Same site · FLOOR · similar product (70–84%)</li>
-          <li>Same site · LOSS · similar product (70–84%)</li>
-          <li>Combo Base · same site · similar product</li>
+          <li>Same site · FILE TYPE = FLOOR</li>
+          <li>Same site · FILE TYPE = LOSS</li>
+          <li>Cross-site · FILE TYPE = FLOOR (near-exact, salvaging ageing &gt; 20 days)</li>
+          <li>Cross-site · FILE TYPE = LOSS (near-exact, salvaging ageing &gt; 20 days)</li>
         </ol>
+        <h3>Within each level</h3>
+        <ul class="guards">
+          <li>Single-AWB matches come before Combo Base items (each combo item goes to a different orphan).</li>
+          <li>FLOOR: orphan ageing lower than salvaging ageing is preferred.</li>
+          <li>Then the higher match score (Exact 85%+ before Similar 70–84%), then picked month Sep › Aug › Jul › Jun › May › Apr › Mar.</li>
+        </ul>
       </div>
       <div>
         <h3>Hard checks on every match</h3>
@@ -249,11 +250,10 @@ footer{margin-top:28px;padding-top:12px;border-top:1px solid var(--line);color:v
           <li>Personal Care, Beauty, Home &amp; Kitchen: if only the salvaging side states a volume, it is read from the images when Image volume check is on. If it can't be read, the match drops to Similar and is flagged "confirm on image".</li>
           <li>Accessory never matches a primary product (cover, case, guard, cable ≠ phone).</li>
           <li>Brand only → Brand column, else Entered Brand; description only → description vs description.</li>
-          <li>Ties broken by ageing fit, then picked month Sep › Aug › Jul › Jun › May › Apr › Mar.</li>
           <li>No brand and no description, or packaging-only text (plastic bag, box, Shadowfax), is excluded with a reason.</li>
         </ul>
         <h3>FLOOR vs LOSS</h3>
-        <ul class="guards"><li>Uses a PENDENCY TYPE column if present; otherwise Loss Bucket Sub Tagging containing "Floor" = FLOOR, everything else = LOSS.</li></ul>
+        <ul class="guards"><li>Read from the FILE TYPE column of the Salvaging Base (FLOOR / LOSS). If a file has no FILE TYPE column, Loss Bucket Sub Tagging containing "Floor" is treated as FLOOR and everything else as LOSS.</li></ul>
       </div>
     </div>
   </details>
@@ -327,7 +327,7 @@ const ORPH_SPEC = {
 const SALV_SPEC = {
   awb: ['awb_number', 'AWB', 'AWB Number'], desc: ['product_names', 'Product Description', 'Description', 'product_name'],
   pcat: ['product_categories'], value: ['product_value'], site: ['DC LIABILITY', 'DC Liability', 'current location'],
-  ptype: ['PENDENCY TYPE', 'Pendency Type'], tag: ['Loss Bucket Tagging'], subtag: ['Loss Bucket Sub Tagging'],
+  ptype: ['FILE TYPE', 'File Type', 'FILETYPE', 'PENDENCY TYPE', 'Pendency Type'], tag: ['Loss Bucket Tagging'], subtag: ['Loss Bucket Sub Tagging'],
   age: ['max_ageing', 'Age', 'Ageing'], month: ['picked_month', 'Picked Month']
 };
 const COMBO_SPEC = { awb: ['awb_number', 'AWB', 'AWB Number'], desc: ['product_names', 'Product Description', 'Description'], pcat: ['product_categories'] };
@@ -687,9 +687,8 @@ async function runMatch(orph, salv, combo, progress, opts) {
           if (r.s < CFG.CROSS_MIN || !o.dt.length || r.specHit < 2 || (o.brand && !r.b)) continue;
           if (!(e.age > CFG.CROSS_AGE)) { bestCrossLow = 'Cross-site candidate ageing ≤ 20 days'; continue; }
         }
-        let tier;
-        if (!e.isCombo) tier = same ? (exact ? (e.ptype === 'FLOOR' ? 1 : 2) : (e.ptype === 'FLOOR' ? 7 : 8)) : (e.ptype === 'FLOOR' ? 3 : 4);
-        else tier = same ? (exact ? 5 : 9) : 6;
+        // strict priority: 1 same site + FLOOR, 2 same site + LOSS, 3 cross site + FLOOR, 4 cross site + LOSS
+        const tier = same ? (e.ptype === 'FLOOR' ? 1 : 2) : (e.ptype === 'FLOOR' ? 3 : 4);
         const ageOk = e.ptype === 'FLOOR' ? (o.age != null && e.age != null && o.age < e.age) : true;
         found.push({ o: k, e: i, s: r.s, tier, ageOk, same, basis: r.basis, gap: (o.age != null && e.age != null) ? Math.abs(e.age - o.age) : 999 });
       }
@@ -700,7 +699,8 @@ async function runMatch(orph, salv, combo, progress, opts) {
     if (!found.length) unmatchedReason[k] = bestReject ? 'No valid match — best candidate (' + Math.round(bestReject.s * 100) + '%) rejected: ' + bestReject.why : bestCrossLow || 'No candidate at or above 70% in salvaging or combo base';
   }
   function cmp(a, b) {
-    return a.tier - b.tier || (b.ageOk - a.ageOk) || (b.s - a.s) || (pool[b.e].mrank - pool[a.e].mrank) || (a.gap - b.gap);
+    // within a tier: single-AWB matches before combo items, then FLOOR ageing fit, then score, month, ageing gap
+    return a.tier - b.tier || (pool[a.e].isCombo - pool[b.e].isCombo) || (b.ageOk - a.ageOk) || (b.s - a.s) || (pool[b.e].mrank - pool[a.e].mrank) || (a.gap - b.gap);
   }
 
   /* ---- one-to-one greedy assignment ---- */
@@ -758,7 +758,7 @@ async function runMatch(orph, salv, combo, progress, opts) {
   return {
     results, notMatched,
     stats: { orphans: O.length, salvaging: salvByAwb.size, comboAwbs: comboGroups.size, matched: results.length, excluded: excluded.filter(Boolean).length,
-      floorRule: sc.ptype ? 'PENDENCY TYPE column' : 'derived from Loss Bucket Sub Tagging ("Floor…" = FLOOR, else LOSS)',
+      floorRule: sc.ptype ? sc.ptype + ' column (FLOOR / LOSS)' : 'derived from Loss Bucket Sub Tagging ("Floor…" = FLOOR, else LOSS)',
       unmappedSites: [...new Set(O.filter(o => !salvSites.has(o.site)).map(o => o.siteRaw))] }
   };
 }
