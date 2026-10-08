@@ -217,7 +217,7 @@ footer{margin-top:28px;padding-top:12px;border-top:1px solid var(--line);color:v
   </details>
 
   <div class="prog" id="prog" hidden>
-    <div class="prog-row"><span id="prog-t">Starting…</span><span id="prog-p" class="mono">0%</span></div>
+    <div class="prog-row"><span id="prog-t">Starting…</span><span><button class="btn sm" id="img-skip" type="button" hidden>Skip image check, show results now</button> <span id="prog-p" class="mono">0%</span></span></div>
     <div class="prog-track"><div class="prog-fill" id="prog-f"></div></div>
   </div>
   <div class="err" id="err" hidden></div>
@@ -915,7 +915,9 @@ async function runMatch(orph, salv, combo, progress, opts) {
   const hasQty = s => { const q = quantities(s); return q.v.length > 0 || q.w.length > 0; };
   const volumeInScope = r => IMG_CATS.test(String(r['Orphan Category'] || '')) && hasQty(r['Salvaging Description']) && !hasQty(r['Orphan Description']);
   const imageIds = r => [...new Set([r._back, r['tag image'], r['Brand image url']].map(driveId).filter(Boolean))];
-  const imgSeen = new Map();   // image ids → volume read, kept for this session
+  const imgSeen = new Map();
+  let imgSkip = false; const inFlight = new Set();
+  $('img-skip').addEventListener('click', () => { imgSkip = true; inFlight.forEach(c => c.abort()); $('img-skip').hidden = true; prog(0.95, 'Stopping image check…'); });   // image ids → volume read, kept for this session
 
   function lsGet(k) { try { return localStorage.getItem(k) || ''; } catch (e) { return ''; } }
   function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
@@ -956,8 +958,11 @@ async function runMatch(orph, salv, combo, progress, opts) {
     async function lane() {
       while (batches.length && !fatal) {
         const b = batches.shift();
+        if (imgSkip) break;
+        const ctl = new AbortController(), timer = setTimeout(() => ctl.abort(), 150000);   // a stuck request is dropped, not waited on
+        inFlight.add(ctl);
         try {
-          const resp = await fetch(cfg.url, { method: 'POST', body: JSON.stringify({ key: cfg.key, items: b.map(x => ({ k: x.k, ids: x.ids })) }) });
+          const resp = await fetch(cfg.url, { method: 'POST', body: JSON.stringify({ key: cfg.key, items: b.map(x => ({ k: x.k, ids: x.ids })) }), signal: ctl.signal });
           const j = await resp.json();
           if (!j.ok) { fatal = j.error || 'the script refused the request'; break; }
           b.forEach(x => {
@@ -965,7 +970,8 @@ async function runMatch(orph, salv, combo, progress, opts) {
             if (!r || r.status === 'error' || r.status === 'timeout') return;   // not cached here, retried next run
             imgSeen.set(x.key, r.qty || ''); if (r.qty) qty[x.k] = r.qty;
           });
-        } catch (e) { if (!done) { fatal = 'could not reach the Apps Script'; break; } }
+        } catch (e) { if (!done && e.name !== 'AbortError') { fatal = 'could not reach the Apps Script'; break; } }
+        finally { clearTimeout(timer); inFlight.delete(ctl); }
         done += b.length;
         prog(0.92, label + ' ' + Math.min(done, todo.length).toLocaleString() + ' / ' + todo.length.toLocaleString() + ' rows');
       }
@@ -981,6 +987,7 @@ async function runMatch(orph, salv, combo, progress, opts) {
     if (!cfg) { res.stats.imageCheck = ic; return res; }
     const firstAwb = new Map(res.results.map(r => [r._oidx, r.AWB]));
     const qty = {}, tried = new Set();
+    imgSkip = false; $('img-skip').hidden = false;
     for (let pass = 1; pass <= 2; pass++) {   // pass 2 covers orphans newly matched to an AWB with a stated volume
       const targets = res.results.filter(r => volumeInScope(r) && !tried.has(r._oidx) && imageIds(r).length);
       if (!targets.length) break;
@@ -989,10 +996,14 @@ async function runMatch(orph, salv, combo, progress, opts) {
       const err = await readVolumes(targets, qty, cfg, pass === 1 ? 'Reading volume on images…' : 'Reading volume on newly matched images…');
       if (err) ic.error = err;
       if (Object.keys(qty).length === before) break;
+      if (imgSkip) { ic.error = 'skipped by you; volumes read so far were applied'; }
+      $('img-skip').hidden = true;
       prog(0.96, 'Re-matching with volumes read from images…');
       res = await m.match({ imageQty: qty });
-      if (err) break;
+      if (err || imgSkip) break;
+      $('img-skip').hidden = false;
     }
+    $('img-skip').hidden = true;
     ic.rows = tried.size; ic.read = Object.keys(qty).length;
     const finalAwb = new Map(res.results.map(r => [r._oidx, r.AWB]));
     Object.keys(qty).forEach(k => { k = +k; if (firstAwb.has(k) && firstAwb.get(k) !== finalAwb.get(k)) ic.changed++; });
@@ -1013,7 +1024,7 @@ async function runMatch(orph, salv, combo, progress, opts) {
     res.stats.imageCheck = Object.assign(res.stats.imageCheck || {}, { unverified: n });
   }
 
-  function fail(msg) { running = false; $('prog').hidden = true; $('go').disabled = false; showErr('Matching stopped: ' + msg); }
+  function fail(msg) { $('img-skip').hidden = true; running = false; $('prog').hidden = true; $('go').disabled = false; showErr('Matching stopped: ' + msg); }
 
   function finish(res) {
     running = false; data = res; visual.clear(); page = 0;
@@ -1147,13 +1158,15 @@ async function runMatch(orph, salv, combo, progress, opts) {
     try {
       if (window.claude && window.claude.use) {
         const dl = await window.claude.use('downloads');
-        if (dl) { try { await dl.save({ filename, data: blob }); } catch (e) { if (e && e.code !== 'declined') showErr('Download did not start: ' + (e.message || e.code)); } return; }
+        if (dl) { try { await dl.save({ filename, data: blob }); } catch (e) { if (e && e.code !== 'declined') showErr('Download did not start: ' + (e.message || e.code) + '. Allow downloads for this page in its Permissions menu, or use the HTML file in Chrome.'); } return; }
+        showErr('Downloads are not available in this view. Allow downloads in the page\'s Permissions menu, or open the HTML file in Chrome.'); return;
       }
     } catch (e) { /* fall through to a normal browser download */ }
     const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = filename; document.body.appendChild(a); a.click();
     setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1500);
   }
-  $('dl-xlsx').addEventListener('click', () => {
+  $('dl-xlsx').addEventListener('click', () => { hideErr(); try { buildXlsx(); } catch (e) { showErr('Could not build the Excel file: ' + (e.message || e) + '. Try Download CSV.'); } });
+  function buildXlsx() {
     if (!data) return;
     const wb = XLSX.utils.book_new();
     const all = exportRows(data.results);
@@ -1175,13 +1188,14 @@ async function runMatch(orph, salv, combo, progress, opts) {
       ['AGEING column', 'Salvaging max_ageing'], ['Age column', 'Salvaging ageing − Orphan ageing (days)']]), 'Run Summary');
     const out = XLSX.write(wb, { bookType: 'xlsx', type: 'array', compression: true });
     save('Orphan_Salvaging_Matches_' + stamp() + '.xlsx', new Blob([out], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }));
-  });
-  $('dl-csv').addEventListener('click', () => {
+  }
+  $('dl-csv').addEventListener('click', () => { hideErr(); try { buildCsv(); } catch (e) { showErr('Could not build the CSV file: ' + (e.message || e)); } });
+  function buildCsv() {
     if (!data) return;
     const rows = view === 'm' ? exportRows(filtered) : filtered;
     const csv = XLSX.utils.sheet_to_csv(XLSX.utils.json_to_sheet(rows));
     save((view === 'm' ? 'Orphan_Matches_' : 'Orphan_Not_Matched_') + stamp() + '.csv', new Blob(['﻿' + csv], { type: 'text/csv' }));
-  });
+  }
 
   renderKpis(); applyFilters();
 })();
