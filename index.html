@@ -203,9 +203,11 @@ footer{margin-top:28px;padding-top:12px;border-top:1px solid var(--line);color:v
   </section>
 
   <details class="imgcfg" id="imgcfg">
-    <summary>Image volume check <span class="pill p-off" id="img-state">Off</span></summary>
+    <summary>Image reading <span class="pill p-off" id="img-state">Off</span></summary>
     <div class="imgcfg-body">
-      <p>For matched Personal Care, Beauty and Home &amp; Kitchen rows where the salvaging description states a volume or weight but the orphan description does not, the dashboard reads the volume printed on the Back, Tag and Brand images, then re-matches. A 100 ml bottle can then no longer pair with a 48 ml listing. This needs the Image Volume Reader Apps Script, set up once, and works when you open this dashboard as the HTML file in Chrome.</p>
+      <p><b>Brand → tag → back image text.</b> For orphans whose Brand or Description is unreadable ("Not visible", "Not clear", "Unidentified") or only packaging ("Plastic bag", "Box"), the dashboard reads the text printed on the brand image first. If that gives no match, it reads the tag image, then the back image, and re-matches after each step against the salvaging descriptions.</p>
+      <div class="imgcfg-row"><label><input type="checkbox" id="img-text-on"> Match unclear orphans from brand → tag → back image text</label></div>
+      <p><b>Volume check.</b> For matched Personal Care, Beauty and Home &amp; Kitchen rows where the salvaging description states a volume or weight but the orphan description does not, the dashboard reads the volume printed on the Back, Tag and Brand images, then re-matches. A 100 ml bottle can then no longer pair with a 48 ml listing. </p>
       <div class="imgcfg-row"><label><input type="checkbox" id="img-on"> Read volumes from images</label></div>
       <div class="imgcfg-row">
         <input type="url" id="img-url" placeholder="Apps Script web app URL (ends in /exec)" aria-label="Apps Script web app URL">
@@ -213,6 +215,7 @@ footer{margin-top:28px;padding-top:12px;border-top:1px solid var(--line);color:v
         <button class="btn sm" id="img-test" type="button">Test connection</button>
       </div>
       <div class="img-msg" id="img-msg">Not connected.</div>
+      <p>Both options use the Orphan Image Reader Apps Script (version 2), which you set up once. They work when you open this dashboard as the HTML file in Chrome.</p>
     </div>
   </details>
 
@@ -250,7 +253,7 @@ footer{margin-top:28px;padding-top:12px;border-top:1px solid var(--line);color:v
           <li>Personal Care, Beauty, Home &amp; Kitchen: if only the salvaging side states a volume, it is read from the images when Image volume check is on. If it can't be read, the match drops to Similar and is flagged "confirm on image".</li>
           <li>Accessory never matches a primary product (cover, case, guard, cable ≠ phone).</li>
           <li>Brand only → Brand column, else Entered Brand; description only → description vs description.</li>
-          <li>No brand and no description, or packaging-only text (plastic bag, box, Shadowfax), is excluded with a reason.</li>
+          <li>No brand and no description, or packaging-only text (plastic bag, box, Shadowfax), is excluded with a reason, unless image reading is on. Then the text printed on the brand image is read first, then the tag image, then the back image, and the orphan is matched when a salvaging title's brand and product words appear on the label.</li>
         </ul>
         <h3>FLOOR vs LOSS</h3>
         <ul class="guards"><li>Read from the FILE TYPE column of the Salvaging Base (FLOOR / LOSS). If a file has no FILE TYPE column, Loss Bucket Sub Tagging containing "Floor" is treated as FLOOR and everything else as LOSS.</li></ul>
@@ -440,7 +443,7 @@ const CAT_ALLOW = {
   baby: ['baby', 'toys', 'beauty_pc', 'apparel'], babycare: ['baby', 'beauty_pc', 'toys'], babyproducts: ['baby', 'toys', 'beauty_pc'],
   petcare: ['home', 'grocery', 'health'], petsupplies: ['home', 'grocery', 'health']
 };
-const ACC_WORDS = new Set(['cover', 'case', 'protector', 'tempered', 'screenguard', 'guard', 'strap', 'skin', 'cable', 'charger', 'adapter', 'adaptor', 'refill', 'nib', 'lens']);
+const ACC_WORDS = new Set(['cover', 'case', 'protector', 'tempered', 'screenguard', 'guard', 'strap', 'cable', 'charger', 'adapter', 'adaptor', 'nib']);
 const PRIMARY_WORDS = new Set(['phone', 'laptop', 'tablet', 'watch', 'smartwatch', 'earbud', 'headphone', 'camera', 'ipad', 'iphone', 'macbook']);
 
 /* ---------- misc ---------- */
@@ -462,6 +465,7 @@ function num(v) { const n = parseFloat(v); return isFinite(n) ? n : null; }
    ============================================================ */
 async function runMatch(orph, salv, combo, progress, opts) {
   const imageQty = (opts && opts.imageQty) || {};
+  const imageText = (opts && opts.imageText) || {};   // { orphanIndex: { text, src: 'brand'|'tag'|'back' } } read from the images
   progress = progress || (() => {});
   const oc = resolveCols(Object.keys(orph[0] || {}), ORPH_SPEC);
   const sc = resolveCols(Object.keys(salv[0] || {}), SALV_SPEC);
@@ -538,6 +542,8 @@ async function runMatch(orph, salv, combo, progress, opts) {
     const brandRaw = r[oc.brand], entRaw = oc.entered ? r[oc.entered] : '';
     let brand = cleanBrand(brandRaw), brandSrc = brand ? 'Brand' : '';
     const descRaw = cleanDesc(r[oc.desc]);
+    const UNCLEAR = /not\s*visible|not\s*clear|unidentified|unknown|detected brand name|no visible|unable|cannot|shadowfax|hadowfa/i;
+    const unclearText = UNCLEAR.test(String(brandRaw || '')) || UNCLEAR.test(String(r[oc.desc] || ''));
     if (!brand && entRaw) { // rule 10: fall back to ENTERED BRAND
       const eb = cleanBrand(entRaw); const et = tokens(eb);
       if (eb && et.length && !et.every(t => GENERIC.has(t) || FAM[t])) { brand = eb; brandSrc = 'Entered Brand'; }
@@ -559,13 +565,26 @@ async function runMatch(orph, salv, combo, progress, opts) {
       idx, r, site: siteKey(r[oc.site]), siteRaw: r[oc.site], age: num(r[oc.age]),
       brand, brandSrc, btoks, weakBrand, bcompact: brand.replace(/\s/g, ''), descRaw, dt, specific,
       imgQty: imageQty[idx] || '', q: quantities(descRaw + (imageQty[idx] ? ' ' + imageQty[idx] : '')), allow,
-      keys: [...new Set([...btoks, ...dt])],
+      keys: [...new Set([...btoks, ...dt])], unclearText,
       models: (String(descRaw).match(/(?<![\d.])\d{2,4}(?![\d.]|\s*(?:%|ml|l\b|ltr|g\b|gm|gms|kg|mg|pcs|pc\b|x\b|cm|mm|inch|w\b|mah|gb|tb))/gi) || []), cat: r[oc.category],
       acc: dt.some(x => ACC_WORDS.has(x)), prim: dt.some(x => PRIMARY_WORDS.has(x))
     };
   });
 
   for (const e of pool) { let ws = 0; for (const t of e.tset) ws += idf(t); e.wsum = ws; }
+  // text read from the orphan's images (brand → tag → back): kept separate from the captured description
+  for (const o of O) {
+    const it = imageText[o.idx];
+    o.imgSrc = it && it.text ? it.src : ''; o.itoks = o.imgSrc ? tokens(it.text) : [];
+    o.itset = new Set(o.itoks); o.imgSnippet = o.imgSrc ? String(it.text).replace(/\s+/g, ' ').slice(0, 90) : '';
+    if (o.itoks.length) {
+      const known = [...o.itset].filter(t => df.has(t)).sort((a, b) => idf(b) - idf(a)).slice(0, 25);
+      o.keys = [...new Set([...o.keys, ...known])];
+      if (o.itoks.some(x => ACC_WORDS.has(x))) o.acc = true;
+      if (!o.q.v.length && !o.q.w.length) { const iq = quantities(it.text); o.q = { v: iq.v, w: iq.w, pack: o.q.pack }; }   // captured volume wins over label text
+      if (!o.allow || !o.allow.size) { const f = families(o.itoks); if (f.size) o.allow = null; }
+    }
+  }
   for (const o of O) {
     o.dtGen = o.dt.map(t => GENERIC.has(t)); o.dtw = o.dt.map((t, j) => idf(t) * (o.dtGen[j] ? 0.35 : 1));
     o.tot = o.dtw.reduce((x, y) => x + y, 0);
@@ -605,6 +624,18 @@ async function runMatch(orph, salv, combo, progress, opts) {
     if (e.acc && !o.acc) return 'Accessory (cover/case/cable…) vs primary product';
     if (o.acc && !e.acc) return 'Accessory (cover/case/cable…) vs primary product';
     return null;
+  }
+  function top6(e) { if (e.t6 === undefined) { const w = [...e.tset].map(idf).sort((a, b) => b - a); e.t6 = w.slice(0, 6).reduce((x, y) => x + y, 0); } return e.t6; }
+  function scoreImg(o, e) {
+    let got = 0, hits = 0, rare = 0;
+    for (const t of e.tset) if (o.itset.has(t)) { const w = idf(t); got += w; hits++; if (w > 4.5) rare++; }
+    if (hits < 2) return { s: 0 };
+    let s = Math.min(1, got / Math.max(1e-9, Math.min(e.wsum, top6(e))));
+    if (hits < 3 || rare < 2) s = Math.min(s, 0.6);                      // the label must show the brand-level word and the product
+    if (o.brand && !brandHit(o, e)) s *= 0.8;                              // a known brand that the listing does not carry
+    if (o.specific.length && !o.specific.some(t => e.tset.has(t))) s *= 0.75;  // label text must not contradict the captured description
+    const g = gate(o, e); if (g) return { s: 0, reject: g, rs: s };
+    return { s, img: true, specHit: rare, b: 1, basis: 'Text read from ' + o.imgSrc + ' image' };
   }
   function score(o, e) {
     let b0 = brandHit(o, e);
@@ -669,28 +700,29 @@ async function runMatch(orph, salv, combo, progress, opts) {
   for (let k = 0; k < O.length; k++) {
     if (k % 400 === 0) { await new Promise(r => setTimeout(r, 0)); } if (k % 250 === 0) progress(0.12 + 0.75 * k / O.length, 'Matching orphans… ' + k.toLocaleString() + ' / ' + O.length.toLocaleString());
     const o = O[k];
-    if (!o.brand && !o.descRaw) { excluded[k] = true; unmatchedReason[k] = 'Excluded — no brand and no product description'; continue; }
-    if (!o.brand && !o.specific.length) { excluded[k] = true; unmatchedReason[k] = 'Excluded — description too generic to identify (e.g. packaging only) and no brand'; continue; }
+    if (!o.itoks.length && !o.brand && !o.descRaw) { excluded[k] = true; unmatchedReason[k] = 'Excluded — no brand and no product description'; continue; }
+    if (!o.itoks.length && !o.brand && !o.specific.length) { excluded[k] = true; unmatchedReason[k] = 'Excluded — description too generic to identify (e.g. packaging only) and no brand'; continue; }
     const found = []; let bestReject = null, bestCrossLow = null;
     const scopes = [];
-    if (salvSites.has(o.site)) scopes.push('site'); if (o.dt.length) scopes.push('cross');   // cross-site needs description evidence
+    if (salvSites.has(o.site)) scopes.push('site'); if (o.dt.length || o.itoks.length) scopes.push('cross');   // cross-site needs description evidence
     for (const scope of scopes) {
       for (const i of candidates(o, scope)) {
         const e = pool[i];
         const same = e.site === o.site;
         if (scope === 'cross' && same) continue;
-        const r = score(o, e);
+        let r = score(o, e);
+        if (o.itoks.length) { const ri = scoreImg(o, e); if (ri.reject && !(r.s >= CFG.MIN)) r = ri; else if (!ri.reject && ri.s > (r.s || 0)) r = ri; }
         if (r.reject) { if (r.rs >= CFG.MIN && (!bestReject || r.rs > bestReject.s)) bestReject = { s: r.rs, why: r.reject }; continue; }
         if (r.s < CFG.MIN) continue;
         const exact = r.s >= CFG.EXACT;
         if (!same) { // cross-site: near-exact + description evidence + age > 20
-          if (r.s < CFG.CROSS_MIN || !o.dt.length || r.specHit < 2 || (o.brand && !r.b)) continue;
+          if (r.img ? (r.s < 0.92 || r.specHit < 3) : (r.s < CFG.CROSS_MIN || !o.dt.length || r.specHit < 2 || (o.brand && !r.b))) continue;
           if (!(e.age > CFG.CROSS_AGE)) { bestCrossLow = 'Cross-site candidate ageing ≤ 20 days'; continue; }
         }
         // strict priority: 1 same site + FLOOR, 2 same site + LOSS, 3 cross site + FLOOR, 4 cross site + LOSS
         const tier = same ? (e.ptype === 'FLOOR' ? 1 : 2) : (e.ptype === 'FLOOR' ? 3 : 4);
         const ageOk = e.ptype === 'FLOOR' ? (o.age != null && e.age != null && o.age < e.age) : true;
-        found.push({ o: k, e: i, s: r.s, tier, ageOk, same, basis: r.basis, gap: (o.age != null && e.age != null) ? Math.abs(e.age - o.age) : 999 });
+        found.push({ o: k, e: i, s: r.s, tier, ageOk, same, basis: r.basis, img: !!r.img, gap: (o.age != null && e.age != null) ? Math.abs(e.age - o.age) : 999 });
       }
     }
     found.sort(cmp);
@@ -722,9 +754,16 @@ async function runMatch(orph, salv, combo, progress, opts) {
   const results = [], notMatched = [];
   for (let k = 0; k < O.length; k++) {
     const o = O[k], p = assigned[k], r = o.r;
-    if (!p) { notMatched.push(Object.assign({}, r, o.imgQty ? { 'IMAGE VOLUME': o.imgQty } : {}, { 'REASON': unmatchedReason[k] })); continue; }
+    if (!p) {
+      const row = Object.assign({}, r, o.imgQty ? { 'IMAGE VOLUME': o.imgQty } : {}, o.imgSrc ? { 'IMAGE TEXT TRIED': o.imgSrc + ': ' + o.imgSnippet } : {}, { 'REASON': unmatchedReason[k] });
+      // fields starting with "_" are used by the dashboard only; they are never shown or exported
+      row._oidx = k; row._imgScope = !!(excluded[k] || o.unclearText);
+      row._imgs = { brand: oc.brandImg ? r[oc.brandImg] : '', tag: oc.tagImg ? r[oc.tagImg] : '', back: oc.backImg ? r[oc.backImg] : '' };
+      notMatched.push(row); continue;
+    }
     const e = pool[p.e];
     const notes = [p.basis];
+    if (p.img) notes.push('Label text: "' + o.imgSnippet + '"');
     if (o.imgQty) notes.push('Volume read from image: ' + o.imgQty);
     if (e.ptype === 'FLOOR' && !p.ageOk) notes.push('Floor ageing rule not met (orphan ageing ≥ salvaging)');
     if (e.bundle && !e.isCombo) notes.push('Pack/bundle in salvaging desc — verify quantity');
@@ -750,7 +789,9 @@ async function runMatch(orph, salv, combo, progress, opts) {
       'Pendency Type': e.ptype, 'Picked Month': e.month || '',
       'Confidence': p.s >= CFG.EXACT ? 'Exact' : 'Similar', 'Match Score %': Math.round(p.s * 100),
       'Notes': notes.join('; '),
-      'Image Volume': o.imgQty, _oidx: k, _tier: p.tier, _brand: o.brand, _back: oc.backImg ? (r[oc.backImg] || '') : ''
+      'Image Volume': o.imgQty,
+      'Matched Via': p.img ? ({ brand: 'Brand image (read)', tag: 'Tag image (read)', back: 'Back image (read)' }[o.imgSrc]) : 'Brand / Description columns',
+      _oidx: k, _tier: p.tier, _brand: o.brand, _back: oc.backImg ? (r[oc.backImg] || '') : ''
     });
   }
   results.sort((a, b) => a._tier - b._tier || b['Match Score %'] - a['Match Score %']);
@@ -772,7 +813,7 @@ async function runMatch(orph, salv, combo, progress, opts) {
   const MB = 1024 * 1024, LIMIT = 200 * MB, PAGE = 100;
   const COLS = ['BARCODE', 'SITE NAME (ORPHAN)', 'AGEING (ORPHAN)', 'AWB', 'AGEING', 'DC Liability (Salvaging)', 'Match Type', 'Age', 'COMBO REMARKS',
     'Orphan Category', 'Orphan Description', 'Salvaging Description', 'Brand image url', 'tag image'];
-  const EXTRA = ['Pendency Type', 'Picked Month', 'Image Volume', 'Confidence', 'Match Score %', 'Visual Confirmation (Y/N)', 'Notes'];
+  const EXTRA = ['Pendency Type', 'Picked Month', 'Matched Via', 'Image Volume', 'Confidence', 'Match Score %', 'Visual Confirmation (Y/N)', 'Notes'];
   const HEAD_TIPS = { 'AGEING': 'Salvaging max_ageing (days)', 'Age': 'Ageing gap = salvaging ageing − orphan ageing (days)' };
   const files = { o: null, s: null };
   let data = null, view = 'm', page = 0, filtered = [];
@@ -817,7 +858,7 @@ async function runMatch(orph, salv, combo, progress, opts) {
     "  if (d.o) BOOKS = await readBooks(d.o, d.s, p, XLSX);",
     "  if (!BOOKS) throw new Error('Files are not loaded.');",
     "  p(0.1, 'Matching…');",
-    "  var res = await runMatch(BOOKS.orph, BOOKS.salv, BOOKS.combo, function (v, t) { p(0.1 + v * 0.9, t); }, { imageQty: d.imageQty || {} });",
+    "  var res = await runMatch(BOOKS.orph, BOOKS.salv, BOOKS.combo, function (v, t) { p(0.1 + v * 0.9, t); }, { imageQty: d.imageQty || {}, imageText: d.imageText || {} });",
     "  res.stats.sheets = BOOKS.sheets; self.postMessage({ type: 'done', res: res });",
     "} catch (e) { self.postMessage({ type: 'err', msg: (e && e.message) || String(e) }); } };"
   ].join('\n');
@@ -885,7 +926,7 @@ async function runMatch(orph, salv, combo, progress, opts) {
           books = await readBooks(payload.o, payload.s, prog, window.XLSX);
         }
         await sleep(30);
-        const res = await runMatch(books.orph, books.salv, books.combo, (v, t) => prog(0.1 + v * 0.9, t), { imageQty: payload.imageQty || {} });
+        const res = await runMatch(books.orph, books.salv, books.combo, (v, t) => prog(0.1 + v * 0.9, t), { imageQty: payload.imageQty || {}, imageText: payload.imageText || {} });
         res.stats.sheets = books.sheets; return res;
       },
       close() { books = null; }
@@ -903,7 +944,12 @@ async function runMatch(orph, salv, combo, progress, opts) {
         if (m) m.close(); m = makeMainMatcher();
         res = await m.match({ o: files.o, s: files.s });
       }
-      res = await imageVolumePass(res, m);
+      const state = { imageQty: {}, imageText: {} };
+      imgSkip = false;
+      res = await imageTextPass(res, m, state);
+      const textStats = res.stats.imageText;
+      res = await imageVolumePass(res, m, state);
+      carryStats({ imageText: textStats }, res.stats);
       flagUnverifiedVolumes(res);
       m.close(); finish(res);
     } catch (e) { if (m) m.close(); fail(e.message || String(e)); }
@@ -921,15 +967,17 @@ async function runMatch(orph, salv, combo, progress, opts) {
 
   function lsGet(k) { try { return localStorage.getItem(k) || ''; } catch (e) { return ''; } }
   function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
-  $('img-url').value = lsGet('sfx-img-url'); $('img-key').value = lsGet('sfx-img-key'); $('img-on').checked = lsGet('sfx-img-on') === '1';
+  $('img-url').value = lsGet('sfx-img-url'); $('img-key').value = lsGet('sfx-img-key'); $('img-on').checked = lsGet('sfx-img-on') === '1'; $('img-text-on').checked = lsGet('sfx-img-text-on') === '1';
   const SCRIPT_URL = /^https:\/\/script\.google(usercontent)?\.com\//;
-  function imgCfg() {
+  function scriptCfg() {
     const url = $('img-url').value.trim(), key = $('img-key').value.trim();
-    return $('img-on').checked && SCRIPT_URL.test(url) && key ? { url, key } : null;
+    return SCRIPT_URL.test(url) && key ? { url, key } : null;
   }
-  function imgState() { const on = !!imgCfg(); $('img-state').textContent = on ? 'On' : 'Off'; $('img-state').className = 'pill ' + (on ? 'p-on' : 'p-off'); }
-  ['img-url', 'img-key', 'img-on'].forEach(id => $(id).addEventListener('change', () => {
-    lsSet('sfx-img-url', $('img-url').value.trim()); lsSet('sfx-img-key', $('img-key').value.trim()); lsSet('sfx-img-on', $('img-on').checked ? '1' : ''); imgState();
+  function imgCfg() { return $('img-on').checked ? scriptCfg() : null; }
+  function textCfg() { return $('img-text-on').checked ? scriptCfg() : null; }
+  function imgState() { const on = !!(imgCfg() || textCfg()); $('img-state').textContent = on ? 'On' : 'Off'; $('img-state').className = 'pill ' + (on ? 'p-on' : 'p-off'); }
+  ['img-url', 'img-key', 'img-on', 'img-text-on'].forEach(id => $(id).addEventListener('change', () => {
+    lsSet('sfx-img-url', $('img-url').value.trim()); lsSet('sfx-img-key', $('img-key').value.trim()); lsSet('sfx-img-on', $('img-on').checked ? '1' : ''); lsSet('sfx-img-text-on', $('img-text-on').checked ? '1' : ''); imgState();
   }));
   imgState();
   function imgMsg(t, cls) { $('img-msg').textContent = t; $('img-msg').className = 'img-msg ' + (cls || ''); }
@@ -939,7 +987,8 @@ async function runMatch(orph, salv, combo, progress, opts) {
     imgMsg('Checking…');
     try {
       const r = await (await fetch(url + (url.includes('?') ? '&' : '?') + 'key=' + encodeURIComponent(key))).json();
-      if (r.ok) { imgMsg('Connected. Image volume check runs with the next matching.', 'ok'); $('img-on').checked = true; $('img-on').dispatchEvent(new Event('change')); }
+      if (r.ok && (r.version || 1) < 2) imgMsg('Connected, but this is version 1 of the script, which can only read volumes. Paste the new ImageVolumeReader.gs and deploy a new version to enable brand → tag → back matching.', 'bad');
+      else if (r.ok) { imgMsg('Connected (script version ' + r.version + '). Image reading runs with the next matching.', 'ok'); }
       else imgMsg('The script answered: ' + (r.error || 'not OK') + '. Check the access key.', 'bad');
     } catch (e) {
       imgMsg('Could not reach the script. Check the URL and that the deployment is set to "Anyone". The published claude.ai page cannot call outside services, so use the HTML file in Chrome.', 'bad');
@@ -981,13 +1030,13 @@ async function runMatch(orph, salv, combo, progress, opts) {
     return fatal;
   }
 
-  async function imageVolumePass(res, m) {
+  async function imageVolumePass(res, m, state) {
     const cfg = imgCfg();
     const ic = { enabled: !!cfg, rows: 0, read: 0, changed: 0, error: '' };
-    if (!cfg) { res.stats.imageCheck = ic; return res; }
+    if (!cfg || imgSkip) { res.stats.imageCheck = ic; return res; }
     const firstAwb = new Map(res.results.map(r => [r._oidx, r.AWB]));
     const qty = {}, tried = new Set();
-    imgSkip = false; $('img-skip').hidden = false;
+    $('img-skip').hidden = false;
     for (let pass = 1; pass <= 2; pass++) {   // pass 2 covers orphans newly matched to an AWB with a stated volume
       const targets = res.results.filter(r => volumeInScope(r) && !tried.has(r._oidx) && imageIds(r).length);
       if (!targets.length) break;
@@ -999,7 +1048,8 @@ async function runMatch(orph, salv, combo, progress, opts) {
       if (imgSkip) { ic.error = 'skipped by you; volumes read so far were applied'; }
       $('img-skip').hidden = true;
       prog(0.96, 'Re-matching with volumes read from images…');
-      res = await m.match({ imageQty: qty });
+      state.imageQty = qty;
+      res = await m.match({ imageQty: qty, imageText: state.imageText });
       if (err || imgSkip) break;
       $('img-skip').hidden = false;
     }
@@ -1008,6 +1058,79 @@ async function runMatch(orph, salv, combo, progress, opts) {
     const finalAwb = new Map(res.results.map(r => [r._oidx, r.AWB]));
     Object.keys(qty).forEach(k => { k = +k; if (firstAwb.has(k) && firstAwb.get(k) !== finalAwb.get(k)) ic.changed++; });
     res.stats.imageCheck = ic;
+    return res;
+  }
+  function carryStats(from, to) { if (from && from.imageText && to && !to.imageText) to.imageText = from.imageText; }
+
+  /* ---------- brand → tag → back image text for unclear orphans ---------- */
+  const textSeen = new Map();   // drive id → label text, kept for this session
+  async function readTexts(items, cfg, label) {
+    const out = {}, todo = [];
+    items.forEach(x => { if (textSeen.has(x.id)) out[x.k] = textSeen.get(x.id); else todo.push(x); });
+    const batches = []; for (let i = 0; i < todo.length; i += 4) batches.push(todo.slice(i, i + 4));
+    let done = 0, fatal = '';
+    async function lane() {
+      while (batches.length && !fatal && !imgSkip) {
+        const b = batches.shift();
+        const ctl = new AbortController(), timer = setTimeout(() => ctl.abort(), 150000);
+        inFlight.add(ctl);
+        try {
+          const resp = await fetch(cfg.url, { method: 'POST', body: JSON.stringify({ key: cfg.key, mode: 'text', items: b.map(x => ({ k: x.k, id: x.id })) }), signal: ctl.signal });
+          const j = await resp.json();
+          if (!j.ok) { fatal = j.error || 'the script refused the request'; break; }
+          if (b.length && j.results && b.every(x => j.results[x.k] && 'qty' in j.results[x.k])) { fatal = 'the Apps Script is version 1; deploy version 2 to read label text'; break; }
+          b.forEach(x => {
+            const r = j.results && j.results[x.k];
+            if (!r || r.status === 'error' || r.status === 'timeout') return;   // retried next run
+            textSeen.set(x.id, r.text || ''); out[x.k] = r.text || '';
+          });
+        } catch (e) { if (!done && e.name !== 'AbortError') { fatal = 'could not reach the Apps Script'; break; } }
+        finally { clearTimeout(timer); inFlight.delete(ctl); }
+        done += b.length;
+        prog(0.85, label + ' ' + Math.min(done, todo.length).toLocaleString() + ' / ' + todo.length.toLocaleString() + ' images');
+      }
+    }
+    prog(0.85, label + ' 0 / ' + todo.length.toLocaleString() + ' images');
+    await Promise.all(Array.from({ length: Math.min(6, batches.length) }, lane));
+    return { texts: out, fatal };
+  }
+
+  async function imageTextPass(res, m, state) {
+    const cfg = textCfg();
+    const it = { enabled: !!cfg, scope: 0, read: { brand: 0, tag: 0, back: 0 }, matched: 0, error: '' };
+    if (!cfg) { res.stats.imageText = it; return res; }
+    const scope = new Map(res.notMatched.filter(r => r._imgScope).map(r => [r._oidx, r._imgs]));
+    it.scope = scope.size;
+    $('img-skip').hidden = false;
+    const NAMES = { brand: 'brand', tag: 'tag', back: 'back' };
+    for (const src of ['brand', 'tag', 'back']) {           // the next image is read only for orphans still unmatched
+      if (imgSkip) break;
+      const open = res.notMatched.filter(r => scope.has(r._oidx) && driveId(scope.get(r._oidx)[src]))
+        .map(r => ({ k: r._oidx, id: driveId(scope.get(r._oidx)[src]) }));
+      if (!open.length) continue;
+      const got = await readTexts(open, cfg, 'Reading ' + NAMES[src] + ' images of unclear orphans…');
+      let n = 0;
+      for (const k in got.texts) {
+        const t = got.texts[k];
+        if (tokens(t).filter(x => !GENERIC.has(x) && !/shadowfax|hadowfa|think|ahead/.test(x)).length < 2) continue;   // nothing legible beyond packaging
+        const prev = state.imageText[k];
+        state.imageText[k] = { src, text: (prev ? prev.text + ' ' : '') + t };
+        n++;
+      }
+      it.read[src] = n;
+      if (got.fatal) it.error = got.fatal;
+      if (n) {
+        $('img-skip').hidden = true;
+        prog(0.88, 'Re-matching with text read from ' + NAMES[src] + ' images…');
+        res = await m.match({ imageQty: state.imageQty, imageText: state.imageText });
+        $('img-skip').hidden = false;
+      }
+      if (got.fatal) break;
+    }
+    $('img-skip').hidden = true;
+    if (imgSkip && !it.error) it.error = 'skipped by you; text read so far was applied';
+    it.matched = res.results.filter(r => r['Matched Via'] && r['Matched Via'] !== 'Brand / Description columns').length;
+    res.stats.imageText = it;
     return res;
   }
 
@@ -1034,7 +1157,8 @@ async function runMatch(orph, salv, combo, progress, opts) {
     const sites = [...new Set(res.results.map(r => r['SITE NAME (ORPHAN)']).concat(res.notMatched.map(r => Object.values(r)[0])))].filter(Boolean).sort();
     $('f-site').innerHTML = '<option value="">All orphan sites</option>' + sites.map(s => '<option>' + esc(s) + '</option>').join('');
     const infos = [];
-    const ic = res.stats.imageCheck || {};
+    const ic = res.stats.imageCheck || {}, itx = res.stats.imageText || {};
+    if (itx.enabled) infos.push('Brand → tag → back image text: ' + (itx.scope || 0).toLocaleString() + ' unclear orphans; readable text from ' + itx.read.brand + ' brand, ' + itx.read.tag + ' tag and ' + itx.read.back + ' back images; ' + (itx.matched || 0).toLocaleString() + ' orphans matched from image text.' + (itx.error ? ' Stopped early: ' + itx.error + '.' : ''));
     if (ic.enabled) infos.push('Image volume check: volume read for ' + (ic.read || 0).toLocaleString() + ' of ' + (ic.rows || 0).toLocaleString() + ' rows; ' + (ic.changed || 0).toLocaleString() + ' matches were rejected or moved to a same-volume AWB.' + (ic.error ? ' Stopped early: ' + ic.error + '.' : ''));
     if (ic.unverified) infos.push(ic.unverified.toLocaleString() + ' Personal Care / Beauty / Home & Kitchen matches have a volume only in the salvaging description' + (ic.enabled ? ' that the images did not show' : '') + '. They are marked Similar with "confirm on image".' + (ic.enabled ? '' : ' Turn on Image volume check to read volumes from the images.'));
     if (res.stats.unmappedSites && res.stats.unmappedSites.length)
@@ -1109,15 +1233,16 @@ async function runMatch(orph, salv, combo, progress, opts) {
           thumbCell(r['Brand image url'], i, 'brand') + thumbCell(r['tag image'], i, 'tag') +
           '<td><span class="pill ' + (r['Pendency Type'] === 'FLOOR' ? 'p-floor' : 'p-loss') + '">' + r['Pendency Type'] + '</span></td>' +
           '<td>' + esc(r['Picked Month']) + '</td>' +
+          '<td>' + (r['Matched Via'] && r['Matched Via'] !== 'Brand / Description columns' ? '<span class="pill p-combo">' + esc(r['Matched Via']) + '</span>' : '<span class="none">Columns</span>') + '</td>' +
           '<td class="mono">' + (r['Image Volume'] ? esc(r['Image Volume']) : '<span class="none">—</span>') + '</td>' +
           '<td><span class="pill ' + (r.Confidence === 'Exact' ? 'p-exact' : 'p-similar') + '">' + r.Confidence + '</span></td>' +
           '<td><div class="score"><span class="num">' + r['Match Score %'] + '%</span><span class="score-bar"><i style="width:' + r['Match Score %'] + '%"></i></span></div></td>' +
           '<td><select class="vis ' + (v === 'Y' ? 'y' : v === 'N' ? 'n' : '') + '" data-i="' + i + '" aria-label="Visual confirmation"><option value="">—</option><option' + (v === 'Y' ? ' selected' : '') + '>Y</option><option' + (v === 'N' ? ' selected' : '') + '>N</option></select></td>' +
           '<td class="note">' + esc(r.Notes) + '</td>' +
           '<td><a target="_blank" rel="noopener" href="https://www.google.com/search?tbm=isch&q=' + encodeURIComponent(String(r['Salvaging Description']).slice(0, 120)) + '">Verify ↗</a></td></tr>';
-      }).join('') || '<tr><td colspan="22" class="none" style="padding:24px">No matches for these filters.</td></tr>';
+      }).join('') || '<tr><td colspan="23" class="none" style="padding:24px">No matches for these filters.</td></tr>';
     } else {
-      const heads = filtered.length ? Object.keys(filtered[0]) : (data && data.notMatched[0] ? Object.keys(data.notMatched[0]) : ['REASON']);
+      const heads = (filtered.length ? Object.keys(filtered[0]) : (data && data.notMatched[0] ? Object.keys(data.notMatched[0]) : ['REASON'])).filter(h => h[0] !== '_');
       $('th').innerHTML = '<tr>' + heads.map(h => '<th>' + esc(h) + '</th>').join('') + '</tr>';
       $('tb').innerHTML = rows.map(r => '<tr>' + heads.map(h => {
         const v = r[h]; const id = /image/i.test(h) ? driveId(v) : '';
@@ -1166,6 +1291,7 @@ async function runMatch(orph, salv, combo, progress, opts) {
     setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1500);
   }
   $('dl-xlsx').addEventListener('click', () => { hideErr(); try { buildXlsx(); } catch (e) { showErr('Could not build the Excel file: ' + (e.message || e) + '. Try Download CSV.'); } });
+  function plainRow(r) { const o = {}; for (const k in r) if (k[0] !== '_') o[k] = r[k]; return o; }
   function buildXlsx() {
     if (!data) return;
     const wb = XLSX.utils.book_new();
@@ -1176,13 +1302,14 @@ async function runMatch(orph, salv, combo, progress, opts) {
     XLSX.utils.book_append_sheet(wb, ws, 'Matches');
     const combo = all.filter(r => r['COMBO REMARKS']);
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(combo.length ? combo : [{ Note: 'No combo shipments matched' }]), 'Combo Shipment Matches');
-    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(data.notMatched.length ? data.notMatched : [{ Note: 'Every orphan was matched' }]), 'Not Matched');
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(data.notMatched.length ? data.notMatched.map(plainRow) : [{ Note: 'Every orphan was matched' }]), 'Not Matched');
     const st = data.stats;
     XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([
       ['Run summary', ''], ['Orphan rows', st.orphans], ['Excluded (no brand/description or packaging only)', st.excluded], ['Matched', st.matched],
       ['Salvaging AWBs scanned', st.salvaging], ['Combo AWBs in COMBO BASE', st.comboAwbs], ['FLOOR / LOSS source', st.floorRule],
       ['Sheets used', 'Orphan: ' + st.sheets.orphan + ' · Salvaging: ' + st.sheets.salvaging + ' · Combo: ' + st.sheets.combo],
       ['Thresholds', 'Exact ≥ 85%, Similar 70–84%, Cross-site ≥ 90% and ageing > 20 days'],
+      ['Brand → tag → back image text', st.imageText && st.imageText.enabled ? st.imageText.scope + ' unclear orphans; ' + st.imageText.matched + ' matched from image text (readable: brand ' + st.imageText.read.brand + ', tag ' + st.imageText.read.tag + ', back ' + st.imageText.read.back + ')' : 'Off'],
       ['Image volume check', st.imageCheck && st.imageCheck.enabled ? 'On: volume read for ' + st.imageCheck.read + ' of ' + st.imageCheck.rows + ' rows; ' + st.imageCheck.changed + ' matches changed' : 'Off'],
       ['Volume unverified (marked Similar)', (st.imageCheck && st.imageCheck.unverified) || 0],
       ['AGEING column', 'Salvaging max_ageing'], ['Age column', 'Salvaging ageing − Orphan ageing (days)']]), 'Run Summary');
@@ -1192,7 +1319,7 @@ async function runMatch(orph, salv, combo, progress, opts) {
   $('dl-csv').addEventListener('click', () => { hideErr(); try { buildCsv(); } catch (e) { showErr('Could not build the CSV file: ' + (e.message || e)); } });
   function buildCsv() {
     if (!data) return;
-    const rows = view === 'm' ? exportRows(filtered) : filtered;
+    const rows = view === 'm' ? exportRows(filtered) : filtered.map(plainRow);
     const csv = XLSX.utils.sheet_to_csv(XLSX.utils.json_to_sheet(rows));
     save((view === 'm' ? 'Orphan_Matches_' : 'Orphan_Not_Matched_') + stamp() + '.csv', new Blob(['﻿' + csv], { type: 'text/csv' }));
   }
