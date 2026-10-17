@@ -240,7 +240,7 @@ footer{margin-top:28px;padding-top:12px;border-top:1px solid var(--line);color:v
         <h3>Ageing rules</h3>
         <ul class="guards">
           <li>Salvaging max_ageing must be at least 2 days more than the orphan's ageing.</li>
-          <li>Orphans with ageing below 6 days match only same-site FLOOR (no same-site LOSS, no cross-site).</li>
+          <li>Orphans with ageing below 6 days match only same-site FLOOR, and only salvaging AWBs with max_ageing between orphan ageing + 2 and 10 days (no same-site LOSS, no cross-site).</li>
         </ul>
         <h3>Match rules (70% minimum)</h3>
         <ol class="ladder">
@@ -317,6 +317,7 @@ const CFG = {
   CROSS_AGE: 20,          // cross-site only for salvaging ageing > 20 days
   MIN_AGE_GAP: 2,         // salvaging ageing must exceed orphan ageing by at least this many days
   YOUNG_ORPHAN_AGE: 6,    // orphans younger than this match only same-site FLOOR pendency
+  YOUNG_MAX_SALV_AGE: 10, // …and only salvaging AWBs with max_ageing up to this many days
   TOPK: 6,                // candidates kept per orphan
   MAX_SCORE_CANDS: 150,   // candidates scored per orphan per scope
   SITE_ALIASES: {         // orphan site name → salvaging DC LIABILITY name (lower-case)
@@ -826,7 +827,7 @@ async function runMatch(orph, salv, combo, progress, opts) {
         const e = pool[i];
         const same = e.site === o.site;
         if (scope === 'cross' && same) continue;
-        const youngBlock = young && !(same && e.ptype === 'FLOOR');
+        const youngBlock = young && !(same && e.ptype === 'FLOOR' && e.age != null && e.age <= CFG.YOUNG_MAX_SALV_AGE);
         // ageing rule: salvaging ageing must be at least 2 days more than orphan ageing
         const gapBlock = o.age != null && e.age != null && e.age - o.age < CFG.MIN_AGE_GAP;
         let r = bestScore(o, e);
@@ -852,7 +853,8 @@ async function runMatch(orph, salv, combo, progress, opts) {
     const seen = new Set();
     for (const f of found) { const key = pool[f.e].useKey; if (seen.has(key)) continue; seen.add(key); pairs.push(f); if (seen.size >= CFG.TOPK) break; }
     if (!found.length) unmatchedReason[k] = ageBlocked ? (ageBlocked.young
-        ? 'Orphan ageing below ' + CFG.YOUNG_ORPHAN_AGE + ' days: only same-site FLOOR allowed; best candidate (' + Math.round(ageBlocked.s * 100) + '%) was ' + (ageBlocked.e.site === o.site ? 'same-site LOSS' : 'cross-site') + ', AWB ' + ageBlocked.e.awb
+        ? 'Orphan ageing below ' + CFG.YOUNG_ORPHAN_AGE + ' days: only same-site FLOOR with salvaging ageing ' + (o.age + CFG.MIN_AGE_GAP) + '–' + CFG.YOUNG_MAX_SALV_AGE + ' days allowed; best candidate (' + Math.round(ageBlocked.s * 100) + '%, AWB ' + ageBlocked.e.awb + ') was '
+          + (ageBlocked.e.site !== o.site ? 'cross-site' : ageBlocked.e.ptype !== 'FLOOR' ? 'same-site LOSS' : 'same-site FLOOR with salvaging ageing ' + ageBlocked.e.age)
         : 'Ageing rule: best candidate (' + Math.round(ageBlocked.s * 100) + '%, AWB ' + ageBlocked.e.awb + ') has salvaging ageing ' + ageBlocked.e.age + ' vs orphan ' + o.age + ' (needs ' + CFG.MIN_AGE_GAP + '+ days more)')
       : bestReject ? 'No valid match — best candidate (' + Math.round(bestReject.s * 100) + '%) rejected: ' + bestReject.why : bestCrossLow || 'No candidate at or above 70% in salvaging or combo base';
   }
@@ -925,7 +927,7 @@ async function runMatch(orph, salv, combo, progress, opts) {
   return {
     results, notMatched,
     stats: { orphans: O.length, salvaging: salvByAwb.size, comboAwbs: comboGroups.size, matched: results.length, excluded: excluded.filter(Boolean).length,
-      clientColumn: sc.client || '', withAgeGap: CFG.MIN_AGE_GAP, youngAge: CFG.YOUNG_ORPHAN_AGE,
+      clientColumn: sc.client || '', withAgeGap: CFG.MIN_AGE_GAP, youngAge: CFG.YOUNG_ORPHAN_AGE, youngMaxSalv: CFG.YOUNG_MAX_SALV_AGE,
       floorRule: sc.ptype ? sc.ptype + ' column (FLOOR / LOSS)' : 'derived from Loss Bucket Sub Tagging ("Floor…" = FLOOR, else LOSS)',
       unmappedSites: [...new Set(O.filter(o => !salvSites.has(o.site)).map(o => o.siteRaw))] }
   };
@@ -1444,7 +1446,7 @@ async function runMatch(orph, salv, combo, progress, opts) {
       ['Volume unverified (marked Similar)', (st.imageCheck && st.imageCheck.unverified) || 0],
       ['Match rules', '1 Brand+Desc→Product/category · 2 Entered Brand+Desc→Product/category · 3 Brand+Desc→Client+desc · 4 Entered Brand+Desc→Client+desc · 70% minimum'],
       ['Client name column', st.clientColumn || 'Not found (rules 3–4 skipped)'],
-      ['Ageing rules', 'Salvaging ageing ≥ orphan ageing + ' + st.withAgeGap + ' days; orphans under ' + st.youngAge + ' days: same-site FLOOR only'],
+      ['Ageing rules', 'Salvaging ageing ≥ orphan ageing + ' + st.withAgeGap + ' days; orphans under ' + st.youngAge + ' days: same-site FLOOR only, salvaging ageing ≤ ' + st.youngMaxSalv + ' days'],
       ['AGEING column', 'Salvaging max_ageing'], ['Age column', 'Salvaging ageing − Orphan ageing (days)']]), 'Run Summary');
     const out = XLSX.write(wb, { bookType: 'xlsx', type: 'array', compression: true });
     save('Orphan_Salvaging_Matches_' + stamp() + '.xlsx', new Blob([out], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }));
