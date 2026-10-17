@@ -237,10 +237,21 @@ footer{margin-top:28px;padding-top:12px;border-top:1px solid var(--line);color:v
           <li>Cross-site · FILE TYPE = FLOOR (near-exact, salvaging ageing &gt; 20 days)</li>
           <li>Cross-site · FILE TYPE = LOSS (near-exact, salvaging ageing &gt; 20 days)</li>
         </ol>
+        <h3>Ageing rules</h3>
+        <ul class="guards">
+          <li>Salvaging max_ageing must be at least 2 days more than the orphan's ageing.</li>
+          <li>Orphans with ageing below 6 days match only same-site FLOOR (no same-site LOSS, no cross-site).</li>
+        </ul>
+        <h3>Match rules (70% minimum)</h3>
+        <ol class="ladder">
+          <li>Brand + Description → Product name &amp; category</li>
+          <li>Entered Brand + Description → Product name &amp; category</li>
+          <li>Brand + Description → Client name &amp; description</li>
+          <li>Entered Brand + Description → Client name &amp; description</li>
+        </ol>
         <h3>Within each level</h3>
         <ul class="guards">
           <li>Single-AWB matches come before Combo Base items (each combo item goes to a different orphan).</li>
-          <li>FLOOR: orphan ageing lower than salvaging ageing is preferred.</li>
           <li>Then the higher match score (Exact 85%+ before Similar 70–84%), then picked month Sep › Aug › Jul › Jun › May › Apr › Mar.</li>
         </ul>
       </div>
@@ -252,7 +263,8 @@ footer{margin-top:28px;padding-top:12px;border-top:1px solid var(--line);color:v
           <li>Volume / weight / pack count must match when both sides state it (200 ml ≠ 400 ml).</li>
           <li>Personal Care, Beauty, Home &amp; Kitchen: if only the salvaging side states a volume, it is read from the images when Image volume check is on. If it can't be read, the match drops to Similar and is flagged "confirm on image".</li>
           <li>Accessory never matches a primary product (cover, case, guard, cable ≠ phone).</li>
-          <li>Brand only → Brand column, else Entered Brand; description only → description vs description.</li>
+          <li>Rules 3–4 need a client name column in the Salvaging Base (client_name / Client Name / Client).</li>
+          <li>Also kept as labelled fallbacks: description only, brand only (no description), and image text. Filter the Match Basis column to see them.</li>
           <li>No brand and no description, or packaging-only text (plastic bag, box, Shadowfax), is excluded with a reason, unless image reading is on. Then the text printed on the brand image is read first, then the tag image, then the back image, and the orphan is matched when a salvaging title's brand and product words appear on the label.</li>
         </ul>
         <h3>FLOOR vs LOSS</h3>
@@ -303,6 +315,8 @@ const CFG = {
   MIN: 0.70,              // reference bar — nothing below is reported as a match
   CROSS_MIN: 0.90,        // cross-site must be near-exact
   CROSS_AGE: 20,          // cross-site only for salvaging ageing > 20 days
+  MIN_AGE_GAP: 2,         // salvaging ageing must exceed orphan ageing by at least this many days
+  YOUNG_ORPHAN_AGE: 6,    // orphans younger than this match only same-site FLOOR pendency
   TOPK: 6,                // candidates kept per orphan
   MAX_SCORE_CANDS: 150,   // candidates scored per orphan per scope
   SITE_ALIASES: {         // orphan site name → salvaging DC LIABILITY name (lower-case)
@@ -331,7 +345,8 @@ const SALV_SPEC = {
   awb: ['awb_number', 'AWB', 'AWB Number'], desc: ['product_names', 'Product Description', 'Description', 'product_name'],
   pcat: ['product_categories'], value: ['product_value'], site: ['DC LIABILITY', 'DC Liability', 'current location'],
   ptype: ['FILE TYPE', 'File Type', 'FILETYPE', 'PENDENCY TYPE', 'Pendency Type'], tag: ['Loss Bucket Tagging'], subtag: ['Loss Bucket Sub Tagging'],
-  age: ['max_ageing', 'Age', 'Ageing'], month: ['picked_month', 'Picked Month']
+  age: ['max_ageing', 'Age', 'Ageing'], month: ['picked_month', 'Picked Month'],
+  client: ['client_name', 'Client Name', 'CLIENT NAME', 'client', 'Client', 'CLIENT', 'clientname', 'Client_Name', 'seller_name', 'Seller Name']
 };
 const COMBO_SPEC = { awb: ['awb_number', 'AWB', 'AWB Number'], desc: ['product_names', 'Product Description', 'Description'], pcat: ['product_categories'] };
 
@@ -455,6 +470,12 @@ function cleanDesc(d) {
   if (/^[a-z]{2,5}\d{6,}[a-z]*$/i.test(raw.replace(/\s/g, ''))) return ''; // AWB/code captured as description
   return raw;
 }
+const CLIENT_SUFFIX = /\b(private|pvt|limited|ltd|llp|inc|india|indian|co|company|corp|corporation|enterprises?|industries|international|retail|consumer|products?|ventures?|technologies|tech|solutions|brands?|online|services|the)\b/g;
+function clientKey(c) {     // words of the client name without company suffixes, e.g. "Honasa Consumer Pvt Ltd" → "honasa"
+  const w = norm(c).replace(CLIENT_SUFFIX, ' ').trim().split(/\s+/).filter(Boolean);
+  const n = w.join(' ');
+  return n.replace(/\s/g, '').length >= 3 && !/^[\d ]+$/.test(n) ? n : '';
+}
 function monthRank(m) { const k = String(m || '').toLowerCase().slice(0, 3); return CFG.MONTH_RANK[k] || 0; }
 function siteKey(s) { const k = String(s || '').toLowerCase().replace(/\s+/g, ' ').trim(); return CFG.SITE_ALIASES[k] || k; }
 function driveId(u) { const m = String(u || '').match(/[?&]id=([\w-]{10,})|\/d\/([\w-]{10,})/); return m ? (m[1] || m[2]) : ''; }
@@ -492,15 +513,19 @@ async function runMatch(orph, salv, combo, progress, opts) {
     return /floor/i.test(p) ? 'FLOOR' : 'LOSS';
   }
   const pool = [];
-  function addEntry(base, descRaw, isCombo, compIdx, compCount) {
-    const desc = String(descRaw == null ? '' : descRaw); const t = tokens(desc);
+  function catText(v) { const c = String(v == null ? '' : v).replace(/_/g, ' ').trim(); return /^(|0|-|na|general|default|others?|misc|\d+)$/i.test(c) ? '' : c; }
+  function addEntry(base, descRaw, isCombo, compIdx, compCount, pcatRaw) {
+    const desc = String(descRaw == null ? '' : descRaw);
+    const cat = catText(pcatRaw !== undefined ? pcatRaw : (sc.pcat ? base[sc.pcat] : ''));
+    const t = tokens(desc + (cat ? ' ' + cat : ''));            // rule 1/2: product name and category
     if (!t.length) return;
     const site = base ? siteKey(base[sc.site]) : '';
     pool.push({
       i: pool.length, awb: String(base[sc.awb]).trim(), desc, toks: t, tset: new Set(t), ntext: ' ' + norm(desc) + ' ',
       ctext: norm(desc).replace(/\s/g, ''), q: quantities(desc), fam: families(t),
       site, siteRaw: base[sc.site], age: num(base[sc.age]), month: sc.month ? base[sc.month] : '', mrank: monthRank(sc.month ? base[sc.month] : ''),
-      ptype: ptypeOf(base), isCombo, compIdx, compCount,
+      ptype: ptypeOf(base), isCombo, compIdx, compCount, cat,
+      client: sc.client ? String(base[sc.client] == null ? '' : base[sc.client]).trim() : '', clKey: sc.client ? clientKey(base[sc.client]) : '',
       useKey: isCombo ? base[sc.awb] + '#' + compIdx : String(base[sc.awb]).trim(),
       acc: t.some(x => ACC_WORDS.has(x)), prim: t.some(x => PRIMARY_WORDS.has(x)),
       bundle: /\b(pack of [2-9]|pack of \d{2}|combo|set of [2-9]|gift (pack|set|box)|kit)\b|\bx\s*[2-9]\b/i.test(desc)
@@ -509,13 +534,13 @@ async function runMatch(orph, salv, combo, progress, opts) {
   for (const [awb, r] of salvByAwb) {
     if (comboGroups.has(awb)) {
       const g = comboGroups.get(awb);
-      g.forEach((c, k) => addEntry(r, c[cc.desc], true, k, g.length));
+      g.forEach((c, k) => addEntry(r, c[cc.desc], true, k, g.length, cc.pcat && catText(c[cc.pcat]) ? c[cc.pcat] : undefined));
     } else addEntry(r, r[sc.desc], false, 0, 1);
   }
   // combo AWBs not present in salvaging base: keep with blank site
   for (const [awb, g] of comboGroups) if (!salvByAwb.has(awb)) {
     const fake = { [sc.awb]: awb, [sc.site]: '', [sc.age]: null }; if (sc.month) fake[sc.month] = '';
-    g.forEach((c, k) => addEntry(fake, c[cc.desc], true, k, g.length));
+    g.forEach((c, k) => addEntry(fake, c[cc.desc], true, k, g.length, cc.pcat ? c[cc.pcat] : ''));
   }
 
   /* ---- IDF + indexes ---- */
@@ -536,6 +561,34 @@ async function runMatch(orph, salv, combo, progress, opts) {
     const ct = e.ctext; // compact index for brand lookups (multi-word brands)
   }
   const salvSites = new Set(pool.map(e => e.site));
+  // rules 3/4: client name index (site → client → rows, and cross-site client → rows with ageing > 20)
+  const clientSite = new Map(), clientCross = new Map(), clientKeys = new Set();
+  for (const e of pool) {
+    if (!e.clKey) continue; clientKeys.add(e.clKey);
+    const k = e.site + '|' + e.clKey; let a = clientSite.get(k); if (!a) clientSite.set(k, a = []); a.push(e.i);
+    if (e.age != null && e.age > CFG.CROSS_AGE) { let b = clientCross.get(e.clKey); if (!b) clientCross.set(e.clKey, b = []); b.push(e.i); }
+  }
+  const clientMatchCache = new Map();
+  const clientWords = new Map([...clientKeys].map(k => [k, k.split(' ')]));
+  const clientByWord = new Map(), clientByCompact = new Map();
+  for (const [k, ws] of clientWords) {
+    for (const w of ws) { let a = clientByWord.get(w); if (!a) clientByWord.set(w, a = []); a.push(k); }
+    const c = ws.join(''); let b = clientByCompact.get(c); if (!b) clientByCompact.set(c, b = []); b.push(k);
+  }
+  function clientKeysFor(brandText) {   // client names that are this brand: same letters, or all words of one inside the other
+    const bw = norm(brandText).split(' ').filter(Boolean), bc = bw.join('');
+    if (bc.length < 3) return [];
+    if (clientMatchCache.has(bc)) return clientMatchCache.get(bc);
+    const out = [], bset = new Set(bw), pool2 = new Set(clientByCompact.get(bc) || []);
+    for (const w of bw) for (const ck of clientByWord.get(w) || []) pool2.add(ck);
+    for (const ck of pool2) { const cw = clientWords.get(ck);
+      const cc = cw.join('');
+      if (cc === bc) { out.push(ck); continue; }
+      const shared = cw.length <= bw.length ? cw : bw, other = cw.length <= bw.length ? bset : new Set(cw);
+      if (shared.join('').length >= 4 && shared.every(x => other.has(x))) out.push(ck);
+    }
+    clientMatchCache.set(bc, out); return out;
+  }
 
   /* ---- prepare orphans ---- */
   const O = orph.map((r, idx) => {
@@ -551,7 +604,7 @@ async function runMatch(orph, salv, combo, progress, opts) {
     let btoks = tokens(brand);
     const bdf = btoks.length ? Math.min(...btoks.map(t => df.get(t) || 0)) : 0;
     let weakBrand = btoks.length > 0 && bdf > 400;           // brand words that are common English ("basic", "soft", "flowers")
-    if (brandSrc === 'Entered Brand' && bdf > 120) { brand = ''; btoks = []; brandSrc = ''; weakBrand = false; }
+    if (brandSrc === 'Entered Brand' && bdf > 120 && !clientKeysFor(brand).length) { brand = ''; btoks = []; brandSrc = ''; weakBrand = false; }
     // a brand that is only generic words is not a brand
     if (!btoks.length || btoks.every(t => GENERIC.has(t))) { brand = ''; btoks = []; brandSrc = ''; }
     const dt = tokens(descRaw).filter(t => !btoks.includes(t));
@@ -589,6 +642,31 @@ async function runMatch(orph, salv, combo, progress, opts) {
     o.dtGen = o.dt.map(t => GENERIC.has(t)); o.dtw = o.dt.map((t, j) => idf(t) * (o.dtGen[j] ? 0.35 : 1));
     o.tot = o.dtw.reduce((x, y) => x + y, 0);
     o.dtU = [...new Set(o.dt)].filter(t => !o.btoks.includes(t)); o.dtUw = o.dtU.map(idf); o.btw = o.btoks.map(idf);
+  }
+  // rules 1–4 use both brand sources: the Brand column and the Entered Brand column
+  function prepVariant(v) {
+    v.dt = tokens(v.descRaw).filter(t => !v.btoks.includes(t)); v.specific = v.dt.filter(t => !GENERIC.has(t));
+    v.dtGen = v.dt.map(t => GENERIC.has(t)); v.dtw = v.dt.map((t, j) => idf(t) * (v.dtGen[j] ? 0.35 : 1));
+    v.tot = v.dtw.reduce((x, y) => x + y, 0);
+    v.dtU = [...new Set(v.dt)].filter(t => !v.btoks.includes(t)); v.dtUw = v.dtU.map(idf); v.btw = v.btoks.map(idf);
+    v.clKeys = clientKeysFor(v.brand);
+    return v;
+  }
+  for (const o of O) {
+    o.clKeys = clientKeysFor(o.brand);
+    o.variants = [o];
+    const other = o.brandSrc === 'Brand' ? (oc.entered ? o.r[oc.entered] : '') : (o.brandSrc === 'Entered Brand' ? o.r[oc.brand] : '');
+    const ob = cleanBrand(other), obt = tokens(ob);
+    if (ob && obt.length && !obt.every(t => GENERIC.has(t) || FAM[t]) && ob.replace(/\s/g, '') !== o.bcompact) {
+      const bdf = Math.min(...obt.map(t => df.get(t) || 0));
+      const isClient = clientKeysFor(ob).length > 0;
+      const src = o.brandSrc === 'Brand' ? 'Entered Brand' : 'Brand';
+      if (src === 'Brand' || bdf <= 120 || isClient) {
+        const v = prepVariant(Object.assign(Object.create(o), { brand: ob, brandSrc: src, btoks: obt, bcompact: ob.replace(/\s/g, ''), weakBrand: bdf > 400 && !isClient }));
+        o.variants.push(v);
+        o.keys = [...new Set([...o.keys, ...obt])];
+      }
+    }
   }
   for (const o of O) o.modelRe = o.models.length ? new RegExp('(?:^|\\D)(?:' + o.models.join('|') + ')(?:\\D|$)') : null;
 
@@ -666,6 +744,41 @@ async function runMatch(orph, salv, combo, progress, opts) {
     return { s, b: b0, d: d.s, specHit: d.specHit, basis };
   }
 
+  // rules 3/4: brand (or entered brand) = salvaging client name, and the description matches the salvaging description
+  function scoreClient(v, e) {
+    if (!v.brand || !e.clKey || !v.clKeys.includes(e.clKey) || !v.dt.length) return null;
+    const d = descScore(v, e);
+    let s = 0.5 + 0.5 * d.s;
+    if (d.specHit === 0) s = Math.min(s, 0.6);                    // client alone is not enough: the product must match too
+    if (v.modelRe && !v.modelRe.test(e.ntext)) s *= 0.85;
+    const g = gate(v, e); if (g) return { s: 0, reject: g, rs: s };
+    return { s, b: 1, d: d.s, specHit: d.specHit, client: true, basis: (v.brandSrc === 'Entered Brand' ? 'Entered Brand' : 'Brand') + ' = client name + Description' };
+  }
+  const RULE = { 1: 'Rule 1 · Brand + Description → Product name & category', 2: 'Rule 2 · Entered Brand + Description → Product name & category',
+    3: 'Rule 3 · Brand + Description → Client name & description', 4: 'Rule 4 · Entered Brand + Description → Client name & description' };
+  function bestScore(o, e) {
+    let best = null, rej = null;
+    for (const v of o.variants) {
+      for (const r of [score(v, e), scoreClient(v, e)]) {
+        if (!r) continue;
+        if (r.reject) { if (!rej || r.rs > rej.rs) rej = r; continue; }
+        if (r.client) r.rule = RULE[v.brandSrc === 'Entered Brand' ? 4 : 3];
+        else if (r.b && /^Brand \+ Description/.test(r.basis)) r.rule = RULE[v.brandSrc === 'Entered Brand' ? 2 : 1];
+        else r.rule = /^Description only/.test(r.basis) ? 'Description only (no brand match)' : /^Brand only/.test(r.basis) ? 'Brand only (no description)' : 'Brand + weak description';
+        if (!best || r.s > best.s) best = r;
+      }
+    }
+    if (best && best.s >= CFG.MIN) return best;
+    return rej && (!best || rej.rs > best.s) ? rej : (best || { s: 0 });
+  }
+  function clientCands(o, scope) {
+    const out = [];
+    for (const v of o.variants) for (const ck of v.clKeys || []) {
+      const a = scope === 'site' ? clientSite.get(o.site + '|' + ck) : clientCross.get(ck);
+      if (a) for (const i of a) out.push(i);
+    }
+    return out.length > 400 ? out.slice(0, 400) : out;
+  }
   function candidates(o, scope) {
     const lists = [];
     for (const t of o.keys) {
@@ -702,15 +815,25 @@ async function runMatch(orph, salv, combo, progress, opts) {
     const o = O[k];
     if (!o.itoks.length && !o.brand && !o.descRaw) { excluded[k] = true; unmatchedReason[k] = 'Excluded — no brand and no product description'; continue; }
     if (!o.itoks.length && !o.brand && !o.specific.length) { excluded[k] = true; unmatchedReason[k] = 'Excluded — description too generic to identify (e.g. packaging only) and no brand'; continue; }
-    const found = []; let bestReject = null, bestCrossLow = null;
+    const found = []; let bestReject = null, bestCrossLow = null, ageBlocked = null;
+    const young = o.age != null && o.age < CFG.YOUNG_ORPHAN_AGE;      // rule: young orphans match only same-site FLOOR
     const scopes = [];
-    if (salvSites.has(o.site)) scopes.push('site'); if (o.dt.length || o.itoks.length) scopes.push('cross');   // cross-site needs description evidence
+    if (salvSites.has(o.site)) scopes.push('site');
+    if (!young && (o.dt.length || o.itoks.length)) scopes.push('cross');   // cross-site needs description evidence
     for (const scope of scopes) {
-      for (const i of candidates(o, scope)) {
+      const cand = new Set(candidates(o, scope)); for (const i of clientCands(o, scope)) cand.add(i);
+      for (const i of cand) {
         const e = pool[i];
         const same = e.site === o.site;
         if (scope === 'cross' && same) continue;
-        let r = score(o, e);
+        const youngBlock = young && !(same && e.ptype === 'FLOOR');
+        // ageing rule: salvaging ageing must be at least 2 days more than orphan ageing
+        const gapBlock = o.age != null && e.age != null && e.age - o.age < CFG.MIN_AGE_GAP;
+        let r = bestScore(o, e);
+        if (youngBlock || gapBlock) {
+          if (!r.reject && r.s >= CFG.MIN && (!ageBlocked || r.s > ageBlocked.s)) ageBlocked = { s: r.s, young: youngBlock, e };
+          continue;
+        }
         if (o.itoks.length) { const ri = scoreImg(o, e); if (ri.reject && !(r.s >= CFG.MIN)) r = ri; else if (!ri.reject && ri.s > (r.s || 0)) r = ri; }
         if (r.reject) { if (r.rs >= CFG.MIN && (!bestReject || r.rs > bestReject.s)) bestReject = { s: r.rs, why: r.reject }; continue; }
         if (r.s < CFG.MIN) continue;
@@ -722,13 +845,16 @@ async function runMatch(orph, salv, combo, progress, opts) {
         // strict priority: 1 same site + FLOOR, 2 same site + LOSS, 3 cross site + FLOOR, 4 cross site + LOSS
         const tier = same ? (e.ptype === 'FLOOR' ? 1 : 2) : (e.ptype === 'FLOOR' ? 3 : 4);
         const ageOk = e.ptype === 'FLOOR' ? (o.age != null && e.age != null && o.age < e.age) : true;
-        found.push({ o: k, e: i, s: r.s, tier, ageOk, same, basis: r.basis, img: !!r.img, gap: (o.age != null && e.age != null) ? Math.abs(e.age - o.age) : 999 });
+        found.push({ o: k, e: i, s: r.s, tier, ageOk, same, basis: r.basis, rule: r.img ? 'Image text' : r.rule, img: !!r.img, gap: (o.age != null && e.age != null) ? Math.abs(e.age - o.age) : 999 });
       }
     }
     found.sort(cmp);
     const seen = new Set();
     for (const f of found) { const key = pool[f.e].useKey; if (seen.has(key)) continue; seen.add(key); pairs.push(f); if (seen.size >= CFG.TOPK) break; }
-    if (!found.length) unmatchedReason[k] = bestReject ? 'No valid match — best candidate (' + Math.round(bestReject.s * 100) + '%) rejected: ' + bestReject.why : bestCrossLow || 'No candidate at or above 70% in salvaging or combo base';
+    if (!found.length) unmatchedReason[k] = ageBlocked ? (ageBlocked.young
+        ? 'Orphan ageing below ' + CFG.YOUNG_ORPHAN_AGE + ' days: only same-site FLOOR allowed; best candidate (' + Math.round(ageBlocked.s * 100) + '%) was ' + (ageBlocked.e.site === o.site ? 'same-site LOSS' : 'cross-site') + ', AWB ' + ageBlocked.e.awb
+        : 'Ageing rule: best candidate (' + Math.round(ageBlocked.s * 100) + '%, AWB ' + ageBlocked.e.awb + ') has salvaging ageing ' + ageBlocked.e.age + ' vs orphan ' + o.age + ' (needs ' + CFG.MIN_AGE_GAP + '+ days more)')
+      : bestReject ? 'No valid match — best candidate (' + Math.round(bestReject.s * 100) + '%) rejected: ' + bestReject.why : bestCrossLow || 'No candidate at or above 70% in salvaging or combo base';
   }
   function cmp(a, b) {
     // within a tier: single-AWB matches before combo items, then FLOOR ageing fit, then score, month, ageing gap
@@ -765,7 +891,6 @@ async function runMatch(orph, salv, combo, progress, opts) {
     const notes = [p.basis];
     if (p.img) notes.push('Label text: "' + o.imgSnippet + '"');
     if (o.imgQty) notes.push('Volume read from image: ' + o.imgQty);
-    if (e.ptype === 'FLOOR' && !p.ageOk) notes.push('Floor ageing rule not met (orphan ageing ≥ salvaging)');
     if (e.bundle && !e.isCombo) notes.push('Pack/bundle in salvaging desc — verify quantity');
     let comboRemark = '';
     if (e.isCombo) {
@@ -790,6 +915,7 @@ async function runMatch(orph, salv, combo, progress, opts) {
       'Confidence': p.s >= CFG.EXACT ? 'Exact' : 'Similar', 'Match Score %': Math.round(p.s * 100),
       'Notes': notes.join('; '),
       'Image Volume': o.imgQty,
+      'Match Basis': p.rule || '', 'Client Name (Salvaging)': e.client || '',
       'Matched Via': p.img ? ({ brand: 'Brand image (read)', tag: 'Tag image (read)', back: 'Back image (read)' }[o.imgSrc]) : 'Brand / Description columns',
       _oidx: k, _tier: p.tier, _brand: o.brand, _back: oc.backImg ? (r[oc.backImg] || '') : ''
     });
@@ -799,6 +925,7 @@ async function runMatch(orph, salv, combo, progress, opts) {
   return {
     results, notMatched,
     stats: { orphans: O.length, salvaging: salvByAwb.size, comboAwbs: comboGroups.size, matched: results.length, excluded: excluded.filter(Boolean).length,
+      clientColumn: sc.client || '', withAgeGap: CFG.MIN_AGE_GAP, youngAge: CFG.YOUNG_ORPHAN_AGE,
       floorRule: sc.ptype ? sc.ptype + ' column (FLOOR / LOSS)' : 'derived from Loss Bucket Sub Tagging ("Floor…" = FLOOR, else LOSS)',
       unmappedSites: [...new Set(O.filter(o => !salvSites.has(o.site)).map(o => o.siteRaw))] }
   };
@@ -813,7 +940,7 @@ async function runMatch(orph, salv, combo, progress, opts) {
   const MB = 1024 * 1024, LIMIT = 200 * MB, PAGE = 100;
   const COLS = ['BARCODE', 'SITE NAME (ORPHAN)', 'AGEING (ORPHAN)', 'AWB', 'AGEING', 'DC Liability (Salvaging)', 'Match Type', 'Age', 'COMBO REMARKS',
     'Orphan Category', 'Orphan Description', 'Salvaging Description', 'Brand image url', 'tag image'];
-  const EXTRA = ['Pendency Type', 'Picked Month', 'Matched Via', 'Image Volume', 'Confidence', 'Match Score %', 'Visual Confirmation (Y/N)', 'Notes'];
+  const EXTRA = ['Pendency Type', 'Picked Month', 'Match Basis', 'Client Name (Salvaging)', 'Matched Via', 'Image Volume', 'Confidence', 'Match Score %', 'Visual Confirmation (Y/N)', 'Notes'];
   const HEAD_TIPS = { 'AGEING': 'Salvaging max_ageing (days)', 'Age': 'Ageing gap = salvaging ageing − orphan ageing (days)' };
   const files = { o: null, s: null };
   let data = null, view = 'm', page = 0, filtered = [];
@@ -1158,6 +1285,7 @@ async function runMatch(orph, salv, combo, progress, opts) {
     $('f-site').innerHTML = '<option value="">All orphan sites</option>' + sites.map(s => '<option>' + esc(s) + '</option>').join('');
     const infos = [];
     const ic = res.stats.imageCheck || {}, itx = res.stats.imageText || {};
+    if (!res.stats.clientColumn) infos.push('No client name column found in the Salvaging Base, so rules 3 and 4 (brand = client name) were skipped. Add a column named client_name or Client Name to use them.');
     if (itx.enabled) infos.push('Brand → tag → back image text: ' + (itx.scope || 0).toLocaleString() + ' unclear orphans; readable text from ' + itx.read.brand + ' brand, ' + itx.read.tag + ' tag and ' + itx.read.back + ' back images; ' + (itx.matched || 0).toLocaleString() + ' orphans matched from image text.' + (itx.error ? ' Stopped early: ' + itx.error + '.' : ''));
     if (ic.enabled) infos.push('Image volume check: volume read for ' + (ic.read || 0).toLocaleString() + ' of ' + (ic.rows || 0).toLocaleString() + ' rows; ' + (ic.changed || 0).toLocaleString() + ' matches were rejected or moved to a same-volume AWB.' + (ic.error ? ' Stopped early: ' + ic.error + '.' : ''));
     if (ic.unverified) infos.push(ic.unverified.toLocaleString() + ' Personal Care / Beauty / Home & Kitchen matches have a volume only in the salvaging description' + (ic.enabled ? ' that the images did not show' : '') + '. They are marked Similar with "confirm on image".' + (ic.enabled ? '' : ' Turn on Image volume check to read volumes from the images.'));
@@ -1233,6 +1361,8 @@ async function runMatch(orph, salv, combo, progress, opts) {
           thumbCell(r['Brand image url'], i, 'brand') + thumbCell(r['tag image'], i, 'tag') +
           '<td><span class="pill ' + (r['Pendency Type'] === 'FLOOR' ? 'p-floor' : 'p-loss') + '">' + r['Pendency Type'] + '</span></td>' +
           '<td>' + esc(r['Picked Month']) + '</td>' +
+          '<td class="note">' + esc(r['Match Basis'] || '') + '</td>' +
+          '<td>' + (r['Client Name (Salvaging)'] ? esc(r['Client Name (Salvaging)']) : '<span class="none">—</span>') + '</td>' +
           '<td>' + (r['Matched Via'] && r['Matched Via'] !== 'Brand / Description columns' ? '<span class="pill p-combo">' + esc(r['Matched Via']) + '</span>' : '<span class="none">Columns</span>') + '</td>' +
           '<td class="mono">' + (r['Image Volume'] ? esc(r['Image Volume']) : '<span class="none">—</span>') + '</td>' +
           '<td><span class="pill ' + (r.Confidence === 'Exact' ? 'p-exact' : 'p-similar') + '">' + r.Confidence + '</span></td>' +
@@ -1240,7 +1370,7 @@ async function runMatch(orph, salv, combo, progress, opts) {
           '<td><select class="vis ' + (v === 'Y' ? 'y' : v === 'N' ? 'n' : '') + '" data-i="' + i + '" aria-label="Visual confirmation"><option value="">—</option><option' + (v === 'Y' ? ' selected' : '') + '>Y</option><option' + (v === 'N' ? ' selected' : '') + '>N</option></select></td>' +
           '<td class="note">' + esc(r.Notes) + '</td>' +
           '<td><a target="_blank" rel="noopener" href="https://www.google.com/search?tbm=isch&q=' + encodeURIComponent(String(r['Salvaging Description']).slice(0, 120)) + '">Verify ↗</a></td></tr>';
-      }).join('') || '<tr><td colspan="23" class="none" style="padding:24px">No matches for these filters.</td></tr>';
+      }).join('') || '<tr><td colspan="25" class="none" style="padding:24px">No matches for these filters.</td></tr>';
     } else {
       const heads = (filtered.length ? Object.keys(filtered[0]) : (data && data.notMatched[0] ? Object.keys(data.notMatched[0]) : ['REASON'])).filter(h => h[0] !== '_');
       $('th').innerHTML = '<tr>' + heads.map(h => '<th>' + esc(h) + '</th>').join('') + '</tr>';
@@ -1312,6 +1442,9 @@ async function runMatch(orph, salv, combo, progress, opts) {
       ['Brand → tag → back image text', st.imageText && st.imageText.enabled ? st.imageText.scope + ' unclear orphans; ' + st.imageText.matched + ' matched from image text (readable: brand ' + st.imageText.read.brand + ', tag ' + st.imageText.read.tag + ', back ' + st.imageText.read.back + ')' : 'Off'],
       ['Image volume check', st.imageCheck && st.imageCheck.enabled ? 'On: volume read for ' + st.imageCheck.read + ' of ' + st.imageCheck.rows + ' rows; ' + st.imageCheck.changed + ' matches changed' : 'Off'],
       ['Volume unverified (marked Similar)', (st.imageCheck && st.imageCheck.unverified) || 0],
+      ['Match rules', '1 Brand+Desc→Product/category · 2 Entered Brand+Desc→Product/category · 3 Brand+Desc→Client+desc · 4 Entered Brand+Desc→Client+desc · 70% minimum'],
+      ['Client name column', st.clientColumn || 'Not found (rules 3–4 skipped)'],
+      ['Ageing rules', 'Salvaging ageing ≥ orphan ageing + ' + st.withAgeGap + ' days; orphans under ' + st.youngAge + ' days: same-site FLOOR only'],
       ['AGEING column', 'Salvaging max_ageing'], ['Age column', 'Salvaging ageing − Orphan ageing (days)']]), 'Run Summary');
     const out = XLSX.write(wb, { bookType: 'xlsx', type: 'array', compression: true });
     save('Orphan_Salvaging_Matches_' + stamp() + '.xlsx', new Blob([out], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }));
