@@ -259,7 +259,7 @@ footer{margin-top:28px;padding-top:12px;border-top:1px solid var(--line);color:v
         <h3>Hard checks on every match</h3>
         <ul class="guards">
           <li>Brand + product type + key ingredient are the core of a match ("Vitamin C+E … Moisturizer" = "Vitamin C+E Moisturizer … 60 ml"); marketing words like Super Bright or Luxury count for little. 70% is the floor, 85%+ is Exact, cross-site needs 90%+.</li>
-          <li>The listing must name the orphan's product type, so a shampoo never matches a hair spray, a face wash never matches a soap, and a protein shake never matches oats. The type is read from the orphan description before "with / for / in". A named flavour or variant must also be in the listing (Strawberry ≠ Watermelon).</li>
+          <li>The listing must name the orphan's product type, so a shampoo never matches a hair spray, a face wash never matches a soap, and a protein shake never matches oats. The type is read from the orphan description before "with / for / in". A named flavour or variant must also be in the listing (Strawberry ≠ Watermelon), and so must the body area (a hair serum never matches a face serum). Words that are part of the brand name ("The Plant Fix") don't count as product detail.</li>
           <li>Brands are recognised with a one-letter typo in either the Brand or Entered Brand column ("dot&amp;kay" = Dot &amp; Key).</li>
           <li>Category must agree with what the salvaging description is (Footwear brand ≠ jeans), unless the orphan's own description clearly names the product (a face wash tagged "Footwear" is treated as a face wash).</li>
           <li>Run-together salvaging text is split into words ("SuperBrightGelMoisturizer"), and "+" is not treated as a word.</li>
@@ -737,6 +737,8 @@ async function runMatch(orph, salv, combo, progress, opts) {
   const TYPE_SYN = { facewash: ['cleanser'], cleanser: ['facewash'], oat: ['muesli', 'cereal', 'granola'], deo: ['perfume', 'rollon'], perfume: ['deo', 'rollon', 'mist'], rollon: ['deo', 'perfume'], bodywash: ['shower'] };
   // product type = the last product noun before "with / for / in / infused", "|", "," or "("
   // ("Ghar Soaps Magic Face Wash" → face wash, "Protein Shake in Double Chocolate" → shake, "Face Wash with Vitamin C Serum" → face wash)
+  const AREA = new Set('hair scalp face eye lip body nail foot feet hand underarm beard'.split(' '));
+  function headPart(raw) { return String(raw || '').split(/\s(?:with|for|in|infused|enriched|containing)\s|[|,(:]/i)[0]; }
   function headType(raw) {
     const text = String(raw || '');
     const head = text.split(/\s(?:with|for|in|infused|enriched|containing)\s|[|,(:]/i)[0];
@@ -752,12 +754,16 @@ async function runMatch(orph, salv, combo, progress, opts) {
     const bt = [...new Set([].concat(...(o.variants || [o]).map(v => v.btoks || [])))];
     const isBrandWord = t => bt.some(b => b === t || (b.length >= 3 && t[0] === b[0] && Math.abs(t.length - b.length) <= 1 && lev1(t, b)));
     o._keys = [...new Set(o.specific.filter(t => !o._types.includes(t) && !FORM_WORDS.has(t) && !MARKETING.has(t) && !isBrandWord(t)))];
+    o._lead = new Set(tokens(o.descRaw).slice(0, 4));                         // brand-name zone of the orphan description
+    o._areas = [...new Set(tokens(headPart(o.descRaw)).filter(t => AREA.has(t)))];  // hair / face / eye / lip / body…
     o._flav = o._keys.filter(t => FLAVOUR.has(t));
     o._keyW = o._keys.map(idf);
   }
   // the orphan names a product type (moisturizer) and the listing is a different one (sunscreen) → not the same product
   function typeConflict(o, e) {
     coreInit(o);
+    // a hair serum is not a face serum: the listing must cover the body area the orphan names
+    if (o._areas.length && !o._areas.some(a => e.tset.has(a)) && [...e.tset].some(t => AREA.has(t))) return true;
     if (!o._types.length) return false;
     const t = o._types[0];
     return !e.tset.has(t) && !(TYPE_SYN[t] || []).some(x => e.tset.has(x));   // the listing does not name the orphan's product type
@@ -765,11 +771,17 @@ async function runMatch(orph, salv, combo, progress, opts) {
   function coreScore(o, e, b) {
     coreInit(o);
     if (!b || !o._types.length || !e.tset.has(o._types[0])) return 0;          // product type must agree
+    // words both titles open with ("The Plant Fix Plix…") are part of the brand name, not product detail
+    // (only when the brand itself sits in that opening zone of both titles)
+    const shared = e.toks.slice(0, 4).filter(t => o._lead.has(t));
+    const brandInLead = (o.variants || [o]).some(v => (v.btoks || []).some(b => shared.includes(b)));
+    const lead = new Set(brandInLead ? shared.filter(t => !FAM[t] && !INGREDIENT.has(t) && !FLAVOUR.has(t)) : []);
+    const keys = o._keys.map((t, j) => [t, o._keyW[j]]).filter(([t]) => !lead.has(t));
     let got = 0, tot = 0, hit = 0;
-    o._keys.forEach((t, j) => { tot += o._keyW[j]; if (e.tset.has(t)) { got += o._keyW[j]; hit++; } });
-    if (o._keys.length && hit / o._keys.length < 0.5) return 0;             // half of the key ingredient/variant words must agree
+    keys.forEach(([t, w]) => { tot += w; if (e.tset.has(t)) { got += w; hit++; } });
+    if (keys.length && hit / keys.length < 0.5) return 0;                   // half of the key ingredient/variant words must agree
     if (o._flav.some(t => !e.tset.has(t))) return 0;                        // a named flavour/variant (strawberry, mango…) must be in the listing
-    if (!o._keys.length) return Math.min(0.75, 0.45 * b + 0.30);             // brand + type only ("Shampoo Bottle"): Similar at most
+    if (!keys.length) return Math.min(0.75, 0.45 * b + 0.30);                // brand + type only ("Shampoo Bottle"): Similar at most
     const key = 0.6 + 0.4 * got / tot;                                        // marketing words (super, bright, luxury…) are ignored
     return Math.min(0.88, 0.45 * b + 0.30 + 0.25 * key);                      // capped below the cross-site bar
   }
