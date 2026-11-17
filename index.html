@@ -1,3 +1,4 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head><body>
 <title>Orphan Salvage Matcher</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -234,8 +235,8 @@ footer{margin-top:28px;padding-top:12px;border-top:1px solid var(--line);color:v
         <ol class="ladder">
           <li>Same site · FILE TYPE = FLOOR</li>
           <li>Same site · FILE TYPE = LOSS</li>
-          <li>Cross-site · FILE TYPE = FLOOR (near-exact, salvaging ageing &gt; 20 days, orphan ageing 15+ days)</li>
-          <li>Cross-site · FILE TYPE = LOSS (near-exact, salvaging ageing &gt; 20 days, orphan ageing 15+ days)</li>
+          <li>Cross-site · AWB not starting with R · FLOOR, then LOSS (near-exact, salvaging ageing &gt; 20 days, orphan ageing 15+ days)</li>
+          <li>Cross-site · AWB starting with R · FLOOR, then LOSS (same conditions)</li>
         </ol>
         <h3>Ageing rules</h3>
         <ul class="guards">
@@ -251,7 +252,8 @@ footer{margin-top:28px;padding-top:12px;border-top:1px solid var(--line);color:v
         </ol>
         <h3>Within each level</h3>
         <ul class="guards">
-          <li>Single-AWB matches come before Combo Base items (each combo item goes to a different orphan).</li>
+          <li>Single-AWB matches come before Combo Base items (each combo item goes to a different orphan). For orphans aged 15+, a single-product AWB at another site comes before a combo AWB at the same site; orphans under 15 can still match a same-site FLOOR combo.</li>
+          <li>A combo AWB is matched only when at least 40% of its items are found among the orphans; otherwise those orphans take their next candidate.</li>
           <li>Then the higher match score (Exact 85%+ before Similar 70–84%), then picked month Sep › Aug › Jul › Jun › May › Apr › Mar.</li>
         </ul>
       </div>
@@ -318,6 +320,7 @@ const CFG = {
   MIN: 0.70,              // reference bar — nothing below is reported as a match
   CROSS_MIN: 0.90,        // cross-site must be near-exact
   CROSS_AGE: 20,          // cross-site only for salvaging ageing > 20 days
+  COMBO_MIN_SHARE: 0.4,   // a combo AWB is matched only when at least this share of its items is found among the orphans
   SHORT_ORPHAN_AGE: 15,   // orphan ageing below this: same-site FLOOR only, salvaging ageing ≥ orphan ageing + SHORT_MIN_GAP
   SHORT_MIN_GAP: 1,
   LONG_MIN_GAP: 0,        // orphan ageing 15 or more: FLOOR then LOSS, salvaging ageing ≥ orphan ageing + LONG_MIN_GAP
@@ -350,7 +353,8 @@ const SALV_SPEC = {
   pcat: ['product_categories'], value: ['product_value'], site: ['DC LIABILITY', 'DC Liability', 'current location'],
   ptype: ['FILE TYPE', 'File Type', 'FILETYPE', 'PENDENCY TYPE', 'Pendency Type'], tag: ['Loss Bucket Tagging'], subtag: ['Loss Bucket Sub Tagging'],
   age: ['max_ageing', 'Age', 'Ageing'], month: ['picked_month', 'Picked Month'],
-  client: ['client_name', 'Client Name', 'CLIENT NAME', 'client', 'Client', 'CLIENT', 'clientname', 'Client_Name', 'seller_name', 'Seller Name']
+  client: ['client_name', 'Client Name', 'CLIENT NAME', 'client', 'Client', 'CLIENT', 'clientname', 'Client_Name', 'seller_name', 'Seller Name'],
+  cpend: ['CENTRAL PENDENCY', 'Central Pendency', 'central_pendency', 'CENTAL PENDENCY'], cbucket: ['CENTRAL BUCKET', 'Central Bucket', 'central_bucket']
 };
 const COMBO_SPEC = { awb: ['awb_number', 'AWB', 'AWB Number'], desc: ['product_names', 'Product Description', 'Description'], pcat: ['product_categories'] };
 
@@ -533,6 +537,7 @@ async function runMatch(orph, salv, combo, progress, opts) {
       ctext: norm(desc).replace(/\s/g, ''), q: quantities(desc), fam: families(t),
       site, siteRaw: base[sc.site], age: num(base[sc.age]), month: sc.month ? base[sc.month] : '', mrank: monthRank(sc.month ? base[sc.month] : ''),
       ptype: ptypeOf(base), isCombo, compIdx, compCount, cat,
+      cpend: sc.cpend ? String(base[sc.cpend] == null ? '' : base[sc.cpend]) : '', cbucket: sc.cbucket ? String(base[sc.cbucket] == null ? '' : base[sc.cbucket]) : '',
       client: sc.client ? String(base[sc.client] == null ? '' : base[sc.client]).trim() : '', clKey: sc.client ? clientKey(base[sc.client]) : '',
       useKey: isCombo ? base[sc.awb] + '#' + compIdx : String(base[sc.awb]).trim(),
       acc: t.some(x => ACC_WORDS.has(x)), prim: t.some(x => PRIMARY_WORDS.has(x)),
@@ -923,8 +928,13 @@ async function runMatch(orph, salv, combo, progress, opts) {
           if (r.img ? (r.s < 0.92 || r.specHit < 3) : (r.s < CFG.CROSS_MIN || !o.dt.length || r.specHit < 2 || (o.brand && !r.b))) continue;
           if (!(e.age > CFG.CROSS_AGE)) { bestCrossLow = 'Cross-site candidate ageing ≤ 20 days'; continue; }
         }
-        // strict priority: 1 same site + FLOOR, 2 same site + LOSS, 3 cross site + FLOOR, 4 cross site + LOSS
-        const tier = same ? (e.ptype === 'FLOOR' ? 1 : 2) : (e.ptype === 'FLOOR' ? 3 : 4);
+        // priority: same site (FLOOR, LOSS) → cross site, AWBs not starting with R first (FLOOR, LOSS), then R AWBs (FLOOR, LOSS).
+        // For orphans aged 15+, a single-product AWB (same site or cross site) comes before any combo AWB;
+        // orphans under 15 match same-site FLOOR only, so their same-site combo AWBs stay in the first level (after single AWBs).
+        const fl = e.ptype === 'FLOOR', rAwb = /^R/i.test(e.awb);
+        let tier;
+        if (!e.isCombo) tier = same ? (fl ? 1 : 2) : (rAwb ? (fl ? 5 : 6) : (fl ? 3 : 4));
+        else tier = same ? (short ? (fl ? 1 : 2) : (fl ? 7 : 8)) : (rAwb ? (fl ? 11 : 12) : (fl ? 9 : 10));
         const ageOk = e.ptype === 'FLOOR' ? (o.age != null && e.age != null && o.age < e.age) : true;
         found.push({ o: k, e: i, s: r.s, tier, ageOk, same, basis: r.basis, rule: r.img ? 'Image text' : r.rule, img: !!r.img, gap: (o.age != null && e.age != null) ? Math.abs(e.age - o.age) : 999 });
       }
@@ -944,16 +954,35 @@ async function runMatch(orph, salv, combo, progress, opts) {
   /* ---- one-to-one greedy assignment ---- */
   progress(0.9, 'Resolving one-to-one assignment…');
   pairs.sort(cmp);
-  const usedKey = new Set(); const assigned = new Array(O.length).fill(null);
-  for (const p of pairs) {
-    if (assigned[p.o]) continue; const e = pool[p.e]; if (usedKey.has(e.useKey)) continue;
-    usedKey.add(e.useKey); assigned[p.o] = p;
+  // a combo AWB is matched only when at least 40% of its items are found among the orphans;
+  // combos below that are dropped and the assignment is redone so those orphans can take their next candidate
+  const bannedCombo = new Map();   // combo AWB → items found when it was dropped
+  let assigned, comboHits;
+  for (let round = 0; round < 8; round++) {
+    const usedKey = new Set(); assigned = new Array(O.length).fill(null);
+    for (const p of pairs) {
+      if (assigned[p.o]) continue; const e = pool[p.e];
+      if (e.isCombo && bannedCombo.has(e.awb)) continue;
+      if (usedKey.has(e.useKey)) continue;
+      usedKey.add(e.useKey); assigned[p.o] = p;
+    }
+    comboHits = new Map();
+    assigned.forEach(p => { if (p && pool[p.e].isCombo) { const a = pool[p.e].awb; comboHits.set(a, (comboHits.get(a) || 0) + 1); } });
+    let dropped = 0;
+    assigned.forEach(p => {
+      if (!p || !pool[p.e].isCombo) return; const e = pool[p.e];
+      if (!bannedCombo.has(e.awb) && comboHits.get(e.awb) / e.compCount < CFG.COMBO_MIN_SHARE) { bannedCombo.set(e.awb, comboHits.get(e.awb) + ' of ' + e.compCount); dropped++; }
+    });
+    if (!dropped) break;
   }
-  for (let k = 0; k < O.length; k++) if (!assigned[k] && !unmatchedReason[k]) unmatchedReason[k] = 'Candidates found but each was assigned to a stronger orphan match';
+  for (let k = 0; k < O.length; k++) {
+    if (assigned[k] || (unmatchedReason[k] && !/^Candidates found/.test(unmatchedReason[k]))) continue;
+    const combo = pairs.find(p => p.o === k && pool[p.e].isCombo && bannedCombo.has(pool[p.e].awb));
+    unmatchedReason[k] = combo ? 'Combo AWB ' + pool[combo.e].awb + ' not matched: only ' + bannedCombo.get(pool[combo.e].awb) + ' items found among orphans (needs ' + Math.round(CFG.COMBO_MIN_SHARE * 100) + '%)'
+      : 'Candidates found but each was assigned to a stronger orphan match';
+  }
 
   /* ---- combo remarks ---- */
-  const comboHits = new Map();
-  assigned.forEach(p => { if (p && pool[p.e].isCombo) { const a = pool[p.e].awb; comboHits.set(a, (comboHits.get(a) || 0) + 1); } });
 
   /* ---- output ---- */
   progress(0.96, 'Preparing results…');
@@ -981,12 +1010,13 @@ async function runMatch(orph, salv, combo, progress, opts) {
     results.push({
       'BARCODE': oc.barcode ? (r[oc.barcode] == null ? '' : r[oc.barcode]) : '',
       'SITE NAME (ORPHAN)': o.siteRaw, 'AGEING (ORPHAN)': o.age == null ? '' : o.age,
-      'AWB': e.awb, 'AGEING': e.age == null ? '' : e.age,
+      'AWB': e.awb, 'CENTAL PENDENCY': e.cpend, 'CENTRAL BUCKET': e.cbucket, 'AGEING': e.age == null ? '' : e.age, 'CLIENT': e.client || '',
       'DC Liability (Salvaging)': e.siteRaw == null ? '' : e.siteRaw,
       'Match Type': p.same ? 'Same-site' : 'Cross-site',
       'Age': (o.age != null && e.age != null) ? e.age - o.age : '',
       'COMBO REMARKS': comboRemark,
       'Orphan Category': r[oc.category] == null ? '' : r[oc.category],
+      'Orpahn Brand': r[oc.brand] == null ? '' : r[oc.brand], 'Entered Brand': oc.entered && r[oc.entered] != null ? r[oc.entered] : '',
       'Orphan Description': o.descRaw || ('[Brand only] ' + (o.brandSrc === 'Entered Brand' ? r[oc.entered] : r[oc.brand])),
       'Salvaging Description': e.desc,
       'Brand image url': oc.brandImg ? (r[oc.brandImg] || '') : '',
@@ -1015,9 +1045,9 @@ async function runMatch(orph, salv, combo, progress, opts) {
 (function () {
   const $ = id => document.getElementById(id);
   const MB = 1024 * 1024, LIMIT = 200 * MB, PAGE = 100;
-  const COLS = ['BARCODE', 'SITE NAME (ORPHAN)', 'AGEING (ORPHAN)', 'AWB', 'AGEING', 'DC Liability (Salvaging)', 'Match Type', 'Age', 'COMBO REMARKS',
-    'Orphan Category', 'Orphan Description', 'Salvaging Description', 'Brand image url', 'tag image'];
-  const EXTRA = ['Pendency Type', 'Picked Month', 'Match Basis', 'Client Name (Salvaging)', 'Matched Via', 'Image Volume', 'Confidence', 'Match Score %', 'Visual Confirmation (Y/N)', 'Notes'];
+  const COLS = ['BARCODE', 'SITE NAME (ORPHAN)', 'AGEING (ORPHAN)', 'AWB', 'CENTAL PENDENCY', 'CENTRAL BUCKET', 'AGEING', 'CLIENT', 'DC Liability (Salvaging)',
+    'Match Type', 'COMBO REMARKS', 'Orpahn Brand', 'Entered Brand', 'Orphan Description', 'Salvaging Description', 'Brand image url', 'tag image', 'Pendency Type', 'Picked Month'];
+  const EXTRA = ['Age', 'Orphan Category', 'Match Basis', 'Matched Via', 'Image Volume', 'Confidence', 'Match Score %', 'Visual Confirmation (Y/N)', 'Notes'];
   const HEAD_TIPS = { 'AGEING': 'Salvaging max_ageing (days)', 'Age': 'Ageing gap = salvaging ageing − orphan ageing (days)' };
   const files = { o: null, s: null };
   let data = null, view = 'm', page = 0, filtered = [];
@@ -1426,28 +1456,31 @@ async function runMatch(orph, salv, combo, progress, opts) {
       $('th').innerHTML = '<tr>' + COLS.concat(EXTRA).concat(['Verify']).map(c => '<th' + (HEAD_TIPS[c] ? ' title="' + HEAD_TIPS[c] + '"' : '') + '>' + esc(c) + '</th>').join('') + '</tr>';
       $('tb').innerHTML = rows.map((r, j) => {
         const i = start + j, v = visual.get(r) || '';
-        const combo = r['COMBO REMARKS'] ? '<span class="pill p-combo' + (/all /.test(r['COMBO REMARKS']) ? ' full' : '') + '">' + esc(r['COMBO REMARKS']) + '</span>' : '<span class="none">—</span>';
-        return '<tr class="conf-' + r.Confidence.toLowerCase() + '">' +
-          '<td class="mono">' + (r.BARCODE !== '' ? esc(r.BARCODE) : '<span class="none">—</span>') + '</td>' +
-          '<td>' + esc(r['SITE NAME (ORPHAN)']) + '</td><td class="num">' + esc(r['AGEING (ORPHAN)']) + '</td>' +
-          '<td class="mono"><b>' + esc(r.AWB) + '</b></td><td class="num">' + esc(r.AGEING) + '</td>' +
-          '<td>' + esc(r['DC Liability (Salvaging)']) + '</td>' +
-          '<td><span class="pill ' + (r['Match Type'] === 'Same-site' ? 'p-same' : 'p-cross') + '">' + r['Match Type'] + '</span></td>' +
-          '<td class="num">' + esc(r.Age) + '</td><td>' + combo + '</td>' +
-          '<td>' + esc(r['Orphan Category']) + '</td><td class="desc">' + esc(r['Orphan Description']) + '</td><td class="desc">' + esc(r['Salvaging Description']) + '</td>' +
-          thumbCell(r['Brand image url'], i, 'brand') + thumbCell(r['tag image'], i, 'tag') +
-          '<td><span class="pill ' + (r['Pendency Type'] === 'FLOOR' ? 'p-floor' : 'p-loss') + '">' + r['Pendency Type'] + '</span></td>' +
-          '<td>' + esc(r['Picked Month']) + '</td>' +
-          '<td class="note">' + esc(r['Match Basis'] || '') + '</td>' +
-          '<td>' + (r['Client Name (Salvaging)'] ? esc(r['Client Name (Salvaging)']) : '<span class="none">—</span>') + '</td>' +
-          '<td>' + (r['Matched Via'] && r['Matched Via'] !== 'Brand / Description columns' ? '<span class="pill p-combo">' + esc(r['Matched Via']) + '</span>' : '<span class="none">Columns</span>') + '</td>' +
-          '<td class="mono">' + (r['Image Volume'] ? esc(r['Image Volume']) : '<span class="none">—</span>') + '</td>' +
-          '<td><span class="pill ' + (r.Confidence === 'Exact' ? 'p-exact' : 'p-similar') + '">' + r.Confidence + '</span></td>' +
-          '<td><div class="score"><span class="num">' + r['Match Score %'] + '%</span><span class="score-bar"><i style="width:' + r['Match Score %'] + '%"></i></span></div></td>' +
-          '<td><select class="vis ' + (v === 'Y' ? 'y' : v === 'N' ? 'n' : '') + '" data-i="' + i + '" aria-label="Visual confirmation"><option value="">—</option><option' + (v === 'Y' ? ' selected' : '') + '>Y</option><option' + (v === 'N' ? ' selected' : '') + '>N</option></select></td>' +
-          '<td class="note">' + esc(r.Notes) + '</td>' +
+        const dash = '<span class="none">—</span>';
+        const txt = x => (x === '' || x == null) ? dash : esc(x);
+        const cell = c => {
+          switch (c) {
+            case 'BARCODE': return '<td class="mono">' + txt(r.BARCODE) + '</td>';
+            case 'AGEING (ORPHAN)': case 'AGEING': case 'Age': return '<td class="num">' + esc(r[c]) + '</td>';
+            case 'AWB': return '<td class="mono"><b>' + esc(r.AWB) + '</b></td>';
+            case 'Match Type': return '<td><span class="pill ' + (r['Match Type'] === 'Same-site' ? 'p-same' : 'p-cross') + '">' + r['Match Type'] + '</span></td>';
+            case 'COMBO REMARKS': return '<td>' + (r['COMBO REMARKS'] ? '<span class="pill p-combo' + (/all /.test(r['COMBO REMARKS']) ? ' full' : '') + '">' + esc(r['COMBO REMARKS']) + '</span>' : dash) + '</td>';
+            case 'Orphan Description': case 'Salvaging Description': return '<td class="desc">' + esc(r[c]) + '</td>';
+            case 'Brand image url': return thumbCell(r['Brand image url'], i, 'brand');
+            case 'tag image': return thumbCell(r['tag image'], i, 'tag');
+            case 'Pendency Type': return '<td><span class="pill ' + (r['Pendency Type'] === 'FLOOR' ? 'p-floor' : 'p-loss') + '">' + r['Pendency Type'] + '</span></td>';
+            case 'Match Basis': case 'Notes': return '<td class="note">' + esc(r[c] || '') + '</td>';
+            case 'Matched Via': return '<td>' + (r['Matched Via'] && r['Matched Via'] !== 'Brand / Description columns' ? '<span class="pill p-combo">' + esc(r['Matched Via']) + '</span>' : '<span class="none">Columns</span>') + '</td>';
+            case 'Image Volume': return '<td class="mono">' + txt(r['Image Volume']) + '</td>';
+            case 'Confidence': return '<td><span class="pill ' + (r.Confidence === 'Exact' ? 'p-exact' : 'p-similar') + '">' + r.Confidence + '</span></td>';
+            case 'Match Score %': return '<td><div class="score"><span class="num">' + r['Match Score %'] + '%</span><span class="score-bar"><i style="width:' + r['Match Score %'] + '%"></i></span></div></td>';
+            case 'Visual Confirmation (Y/N)': return '<td><select class="vis ' + (v === 'Y' ? 'y' : v === 'N' ? 'n' : '') + '" data-i="' + i + '" aria-label="Visual confirmation"><option value="">—</option><option' + (v === 'Y' ? ' selected' : '') + '>Y</option><option' + (v === 'N' ? ' selected' : '') + '>N</option></select></td>';
+            default: return '<td>' + txt(r[c]) + '</td>';
+          }
+        };
+        return '<tr class="conf-' + r.Confidence.toLowerCase() + '">' + COLS.concat(EXTRA).map(cell).join('') +
           '<td><a target="_blank" rel="noopener" href="https://www.google.com/search?tbm=isch&q=' + encodeURIComponent(String(r['Salvaging Description']).slice(0, 120)) + '">Verify ↗</a></td></tr>';
-      }).join('') || '<tr><td colspan="25" class="none" style="padding:24px">No matches for these filters.</td></tr>';
+      }).join('') || '<tr><td colspan="' + (COLS.length + EXTRA.length + 1) + '" class="none" style="padding:24px">No matches for these filters.</td></tr>';
     } else {
       const heads = (filtered.length ? Object.keys(filtered[0]) : (data && data.notMatched[0] ? Object.keys(data.notMatched[0]) : ['REASON'])).filter(h => h[0] !== '_');
       $('th').innerHTML = '<tr>' + heads.map(h => '<th>' + esc(h) + '</th>').join('') + '</tr>';
@@ -1537,3 +1570,5 @@ async function runMatch(orph, salv, combo, progress, opts) {
   renderKpis(); applyFilters();
 })();
 </script>
+
+</body></html>
