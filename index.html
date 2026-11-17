@@ -254,6 +254,7 @@ footer{margin-top:28px;padding-top:12px;border-top:1px solid var(--line);color:v
         <ul class="guards">
           <li>Single-AWB matches come before Combo Base items (each combo item goes to a different orphan). For orphans aged 15+, a single-product AWB at another site comes before a combo AWB at the same site; orphans under 15 can still match a same-site FLOOR combo.</li>
           <li>A combo AWB is matched only when at least 40% of its items are found among the orphans; otherwise those orphans take their next candidate.</li>
+          <li>Cross-site combo AWBs: non-R AWBs before R AWBs; within each, the combo with the highest share of its items found among the orphans comes first, then FLOOR before LOSS.</li>
           <li>Then the higher match score (Exact 85%+ before Similar 70–84%), then picked month Sep › Aug › Jul › Jun › May › Apr › Mar.</li>
         </ul>
       </div>
@@ -889,6 +890,7 @@ async function runMatch(orph, salv, combo, progress, opts) {
   function bsearch(A, v) { let lo = 0, hi = A.length - 1; while (lo <= hi) { const m = (lo + hi) >> 1; if (A[m] === v) return true; if (A[m] < v) lo = m + 1; else hi = m - 1; } return false; }
 
   /* ---- generate candidate pairs ---- */
+  const comboShare = new Map();   // combo AWB → share of its items that have at least one orphan candidate (filled before assignment)
   const pairs = []; const unmatchedReason = new Array(O.length).fill('');
   const excluded = new Array(O.length).fill(false);
   for (let k = 0; k < O.length; k++) {
@@ -934,7 +936,9 @@ async function runMatch(orph, salv, combo, progress, opts) {
         const fl = e.ptype === 'FLOOR', rAwb = /^R/i.test(e.awb);
         let tier;
         if (!e.isCombo) tier = same ? (fl ? 1 : 2) : (rAwb ? (fl ? 5 : 6) : (fl ? 3 : 4));
-        else tier = same ? (short ? (fl ? 1 : 2) : (fl ? 7 : 8)) : (rAwb ? (fl ? 11 : 12) : (fl ? 9 : 10));
+        // cross-site combos: non-R AWBs (tier 9) before R AWBs (tier 11); inside each, the combo with the highest
+        // share of its items found among the orphans comes first, then FLOOR before LOSS (see cmp)
+        else tier = same ? (short ? (fl ? 1 : 2) : (fl ? 7 : 8)) : (rAwb ? 11 : 9);
         const ageOk = e.ptype === 'FLOOR' ? (o.age != null && e.age != null && o.age < e.age) : true;
         found.push({ o: k, e: i, s: r.s, tier, ageOk, same, basis: r.basis, rule: r.img ? 'Image text' : r.rule, img: !!r.img, gap: (o.age != null && e.age != null) ? Math.abs(e.age - o.age) : 999 });
       }
@@ -947,12 +951,23 @@ async function runMatch(orph, salv, combo, progress, opts) {
       : bestReject ? 'No valid match — best candidate (' + Math.round(bestReject.s * 100) + '%) rejected: ' + bestReject.why : bestCrossLow || (noCross ? 'No candidate at or above 70% at its own site (orphans under ' + CFG.SHORT_ORPHAN_AGE + ' days match same-site FLOOR only)' : 'No candidate at or above 70% in salvaging or combo base');
   }
   function cmp(a, b) {
+    if (a.tier === b.tier && (a.tier === 9 || a.tier === 11)) {
+      const ea = pool[a.e], eb = pool[b.e];
+      const d = (comboShare.get(eb.awb) || 0) - (comboShare.get(ea.awb) || 0);
+      if (d) return d;
+      if (ea.ptype !== eb.ptype) return ea.ptype === 'FLOOR' ? -1 : 1;
+    }
     // within a tier: single-AWB matches before combo items, then FLOOR ageing fit, then score, month, ageing gap
     return a.tier - b.tier || (pool[a.e].isCombo - pool[b.e].isCombo) || (b.ageOk - a.ageOk) || (b.s - a.s) || (pool[b.e].mrank - pool[a.e].mrank) || (a.gap - b.gap);
   }
 
   /* ---- one-to-one greedy assignment ---- */
   progress(0.9, 'Resolving one-to-one assignment…');
+  {
+    const items = new Map();
+    for (const p of pairs) { const e = pool[p.e]; if (!e.isCombo) continue; let s = items.get(e.awb); if (!s) items.set(e.awb, s = { idx: new Set(), n: e.compCount }); s.idx.add(e.compIdx); }
+    for (const [awb, s] of items) comboShare.set(awb, s.idx.size / s.n);
+  }
   pairs.sort(cmp);
   // a combo AWB is matched only when at least 40% of its items are found among the orphans;
   // combos below that are dropped and the assignment is redone so those orphans can take their next candidate
