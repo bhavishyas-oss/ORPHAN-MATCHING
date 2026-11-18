@@ -254,7 +254,8 @@ footer{margin-top:28px;padding-top:12px;border-top:1px solid var(--line);color:v
         <ul class="guards">
           <li>Single-AWB matches come before Combo Base items (each combo item goes to a different orphan). For orphans aged 15+, a single-product AWB at another site comes before a combo AWB at the same site; orphans under 15 can still match a same-site FLOOR combo.</li>
           <li>A combo AWB is matched only when at least 40% of its items are found among the orphans; otherwise those orphans take their next candidate.</li>
-          <li>Cross-site combo AWBs: non-R AWBs before R AWBs; within each, the combo with the highest share of its items found among the orphans comes first, then FLOOR before LOSS.</li>
+          <li>Cross-site combo AWBs: non-R AWBs before R AWBs; within each, the AWB with the fewest combo items comes first, then the highest share of its items found among the orphans, then FLOOR before LOSS.</li>
+          <li>Same-site combo AWBs: FLOOR before LOSS; within each, the AWB with the fewest combo items comes first.</li>
           <li>Then the higher match score (Exact 85%+ before Similar 70–84%), then picked month Sep › Aug › Jul › Jun › May › Apr › Mar.</li>
         </ul>
       </div>
@@ -952,13 +953,18 @@ async function runMatch(orph, salv, combo, progress, opts) {
   }
   function cmp(a, b) {
     if (a.tier === b.tier && (a.tier === 9 || a.tier === 11)) {
+      // cross-site combos (non-R and R already split by tier): fewest combo items first, then highest share found, then FLOOR
       const ea = pool[a.e], eb = pool[b.e];
+      if (ea.compCount !== eb.compCount) return ea.compCount - eb.compCount;
       const d = (comboShare.get(eb.awb) || 0) - (comboShare.get(ea.awb) || 0);
       if (d) return d;
       if (ea.ptype !== eb.ptype) return ea.ptype === 'FLOOR' ? -1 : 1;
     }
-    // within a tier: single-AWB matches before combo items, then FLOOR ageing fit, then score, month, ageing gap
-    return a.tier - b.tier || (pool[a.e].isCombo - pool[b.e].isCombo) || (b.ageOk - a.ageOk) || (b.s - a.s) || (pool[b.e].mrank - pool[a.e].mrank) || (a.gap - b.gap);
+    // within a tier: single-AWB matches before combo items; between two combo AWBs (same site, FLOOR/LOSS already split by tier)
+    // the one with fewest combo items first; then FLOOR ageing fit, score, month, ageing gap
+    const ca = pool[a.e], cb = pool[b.e];
+    return a.tier - b.tier || (ca.isCombo - cb.isCombo) || (ca.isCombo && cb.isCombo ? ca.compCount - cb.compCount : 0) ||
+      (b.ageOk - a.ageOk) || (b.s - a.s) || (cb.mrank - ca.mrank) || (a.gap - b.gap);
   }
 
   /* ---- one-to-one greedy assignment ---- */
@@ -973,7 +979,7 @@ async function runMatch(orph, salv, combo, progress, opts) {
   // combos below that are dropped and the assignment is redone so those orphans can take their next candidate
   const bannedCombo = new Map();   // combo AWB → items found when it was dropped
   let assigned, comboHits;
-  for (let round = 0; round < 8; round++) {
+  for (let round = 0; round < 2000; round++) {
     const usedKey = new Set(); assigned = new Array(O.length).fill(null);
     for (const p of pairs) {
       if (assigned[p.o]) continue; const e = pool[p.e];
@@ -983,12 +989,17 @@ async function runMatch(orph, salv, combo, progress, opts) {
     }
     comboHits = new Map();
     assigned.forEach(p => { if (p && pool[p.e].isCombo) { const a = pool[p.e].awb; comboHits.set(a, (comboHits.get(a) || 0) + 1); } });
-    let dropped = 0;
+    // drop only the weakest failing combo(s) per pass, so orphans freed from them can lift another combo above 40%
+    const failing = new Map();
     assigned.forEach(p => {
       if (!p || !pool[p.e].isCombo) return; const e = pool[p.e];
-      if (!bannedCombo.has(e.awb) && comboHits.get(e.awb) / e.compCount < CFG.COMBO_MIN_SHARE) { bannedCombo.set(e.awb, comboHits.get(e.awb) + ' of ' + e.compCount); dropped++; }
+      const share = comboHits.get(e.awb) / e.compCount;
+      if (share < CFG.COMBO_MIN_SHARE) failing.set(e.awb, { share, hits: comboHits.get(e.awb), txt: comboHits.get(e.awb) + ' of ' + e.compCount });
     });
-    if (!dropped) break;
+    if (!failing.size) break;
+    // weakest = lowest share, then fewest items found
+    const [wAwb, wf] = [...failing.entries()].sort((x, y) => x[1].share - y[1].share || x[1].hits - y[1].hits)[0];
+    bannedCombo.set(wAwb, wf.txt);
   }
   for (let k = 0; k < O.length; k++) {
     if (assigned[k] || (unmatchedReason[k] && !/^Candidates found/.test(unmatchedReason[k]))) continue;
