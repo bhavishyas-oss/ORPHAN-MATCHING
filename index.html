@@ -254,6 +254,7 @@ footer{margin-top:28px;padding-top:12px;border-top:1px solid var(--line);color:v
         <ul class="guards">
           <li>Single-AWB matches come before Combo Base items (each combo item goes to a different orphan). For orphans aged 15+, a single-product AWB at another site comes before a combo AWB at the same site; orphans under 15 can still match a same-site FLOOR combo.</li>
           <li>A combo AWB is matched only when at least 40% of its items are found among the orphans; otherwise those orphans take their next candidate.</li>
+          <li>All items of one combo AWB must come from orphans at the same site; the site that covers the most items is kept.</li>
           <li>Cross-site combo AWBs: non-R AWBs before R AWBs; within each, the AWB with the fewest combo items comes first, then the highest share of its items found among the orphans, then FLOOR before LOSS.</li>
           <li>Same-site combo AWBs: FLOOR before LOSS; within each, the AWB with the fewest combo items comes first.</li>
           <li>Then the higher match score (Exact 85%+ before Similar 70–84%), then picked month Sep › Aug › Jul › Jun › May › Apr › Mar.</li>
@@ -969,6 +970,31 @@ async function runMatch(orph, salv, combo, progress, opts) {
 
   /* ---- one-to-one greedy assignment ---- */
   progress(0.9, 'Resolving one-to-one assignment…');
+  // all items of one combo AWB must come from orphans at the same site: keep the site that covers the most items
+  // (then the most orphans); candidates from other sites are dropped so those orphans take their next candidate
+  const comboOtherSite = new Map();   // orphan index → { awb } of a combo it lost to another site
+  {
+    const bySite = new Map();
+    for (const p of pairs) {
+      const e = pool[p.e]; if (!e.isCombo) continue;
+      let m = bySite.get(e.awb); if (!m) bySite.set(e.awb, m = new Map());
+      const st = O[p.o].site; let x = m.get(st); if (!x) m.set(st, x = { items: new Set(), orph: new Set() });
+      x.items.add(e.compIdx); x.orph.add(p.o);
+    }
+    const keep = new Map();
+    for (const [awb, m] of bySite) {
+      let best = null, bk = null;
+      for (const [st, x] of m) if (!best || x.items.size > best.items.size || (x.items.size === best.items.size && x.orph.size > best.orph.size)) { best = x; bk = st; }
+      keep.set(awb, bk);
+    }
+    let w = 0;
+    for (const p of pairs) {
+      const e = pool[p.e];
+      if (e.isCombo && keep.get(e.awb) !== O[p.o].site) { if (!comboOtherSite.has(p.o)) comboOtherSite.set(p.o, { awb: e.awb }); continue; }
+      pairs[w++] = p;
+    }
+    pairs.length = w;
+  }
   {
     const items = new Map();
     for (const p of pairs) { const e = pool[p.e]; if (!e.isCombo) continue; let s = items.get(e.awb); if (!s) items.set(e.awb, s = { idx: new Set(), n: e.compCount }); s.idx.add(e.compIdx); }
@@ -1004,7 +1030,9 @@ async function runMatch(orph, salv, combo, progress, opts) {
   for (let k = 0; k < O.length; k++) {
     if (assigned[k] || (unmatchedReason[k] && !/^Candidates found/.test(unmatchedReason[k]))) continue;
     const combo = pairs.find(p => p.o === k && pool[p.e].isCombo && bannedCombo.has(pool[p.e].awb));
+    const other = comboOtherSite.get(k);
     unmatchedReason[k] = combo ? 'Combo AWB ' + pool[combo.e].awb + ' not matched: only ' + bannedCombo.get(pool[combo.e].awb) + ' items found among orphans (needs ' + Math.round(CFG.COMBO_MIN_SHARE * 100) + '%)'
+      : other ? 'Combo AWB ' + other.awb + ' items are matched to orphans at another site; all items of a combo must come from one site'
       : 'Candidates found but each was assigned to a stronger orphan match';
   }
 
