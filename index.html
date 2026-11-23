@@ -235,7 +235,7 @@ footer{margin-top:28px;padding-top:12px;border-top:1px solid var(--line);color:v
         <ol class="ladder">
           <li>Same site · FILE TYPE = FLOOR</li>
           <li>Same site · FILE TYPE = LOSS</li>
-          <li>Cross-site · AWB not starting with R · FLOOR, then LOSS (near-exact, salvaging ageing &gt; 20 days, orphan ageing 16+ days)</li>
+          <li>Cross-site · AWB not starting with R · FLOOR, then LOSS (80%+ with the brand matching, or 90%+ without a brand; salvaging ageing &gt; 20 days; orphan ageing 16+ days)</li>
           <li>Cross-site · AWB starting with R · FLOOR, then LOSS (same conditions)</li>
         </ol>
         <h3>Ageing rules</h3>
@@ -256,6 +256,7 @@ footer{margin-top:28px;padding-top:12px;border-top:1px solid var(--line);color:v
           <li>A pack written in the salvaging description is also a combo: "Pack of 2", "Set of 6", "2 Packs", "500g X 2", "2x 50 ml" become 2–12 identical items, and a list like "Roll On X 1, Body Lotion X 1, Body Wash X 2" is split into its products. Packs of more than 12 stay one item. Mobile phones are never packs ("Redmi X2" is a model name).</li>
           <li>Combo AWBs have no minimum share: a combo is matched even when only some of its items are found, and COMBO REMARKS shows how many (for example "partial (1 of 8 items) — manual review").</li>
           <li>All items of one combo AWB must come from orphans at the same site; the site that covers the most items is kept.</li>
+          <li>Site names are matched ignoring "_" and spaces, plus these mappings: NCR BAMNOLI A BLOCK = NCR Bamnoli DC, Kolkata CXD DC = Kolkata XD DC, BLR Superstore = Bangalore Superstore DC.</li>
           <li>Combo AWBs: the highest share of items found among the orphans comes first (100%, then 90%, 80%…); then the combo with more items found; then same-site FLOOR, same-site LOSS, cross-site (non-R FLOOR, non-R LOSS, R FLOOR, R LOSS).</li>
           <li>Then the higher match score (Exact 85%+ before Similar 70–84%), then picked month Sep › Aug › Jul › Jun › May › Apr › Mar.</li>
         </ul>
@@ -263,7 +264,7 @@ footer{margin-top:28px;padding-top:12px;border-top:1px solid var(--line);color:v
       <div>
         <h3>Hard checks on every match</h3>
         <ul class="guards">
-          <li>Brand + product type + key ingredient are the core of a match ("Vitamin C+E … Moisturizer" = "Vitamin C+E Moisturizer … 60 ml"); marketing words like Super Bright or Luxury count for little. 70% is the floor, 85%+ is Exact, cross-site needs 90%+.</li>
+          <li>Brand + product type + key ingredient are the core of a match ("Vitamin C+E … Moisturizer" = "Vitamin C+E Moisturizer … 60 ml"); marketing words like Super Bright or Luxury count for little. 70% is the floor, 85%+ is Exact, cross-site needs 80%+ with the brand matching (90%+ without a brand).</li>
           <li>The listing must name the orphan's product type, so a shampoo never matches a hair spray, a face wash never matches a soap, and a protein shake never matches oats. The type is read from the orphan description before "with / for / in". A named flavour or variant must also be in the listing (Strawberry ≠ Watermelon), and so must the body area (a hair serum never matches a face serum). Words that are part of the brand name ("The Plant Fix") don't count as product detail.</li>
           <li>Brands are recognised with a one-letter typo in either the Brand or Entered Brand column ("dot&amp;kay" = Dot &amp; Key).</li>
           <li>Category must agree with what the salvaging description is (Footwear brand ≠ jeans), unless the orphan's own description clearly names the product (a face wash tagged "Footwear" is treated as a face wash).</li>
@@ -321,7 +322,7 @@ footer{margin-top:28px;padding-top:12px;border-top:1px solid var(--line);color:v
 const CFG = {
   EXACT: 0.85,            // ≥ this = Exact match
   MIN: 0.70,              // reference bar — nothing below is reported as a match
-  CROSS_MIN: 0.90,        // cross-site must be near-exact
+  CROSS_MIN: 0.80,        // cross-site needs 80%+
   CROSS_AGE: 20,          // cross-site only for salvaging ageing > 20 days
   COMBO_MIN_SHARE: 0,     // no minimum: a combo is matched whatever share of its items is found (higher shares are matched first)
   SHORT_ORPHAN_AGE: 15,   // orphan ageing up to and including this: same-site FLOOR only, salvaging ageing ≥ orphan ageing + SHORT_MIN_GAP
@@ -331,7 +332,7 @@ const CFG = {
   TOPK: 6,                // candidates kept per orphan
   MAX_SCORE_CANDS: 150,   // candidates scored per orphan per scope
   SITE_ALIASES: {         // orphan site name → salvaging DC LIABILITY name (lower-case)
-    'blr superstore': 'bangalore superstore dc'
+    'blr superstore': 'bangalore superstore dc', 'ncr bamnoli a block': 'ncr bamnoli dc', 'kolkata cxd dc': 'kolkata xd dc'
   },
   MONTH_RANK: { sep: 7, aug: 6, jul: 5, jun: 4, may: 3, apr: 2, mar: 1 }
 };
@@ -493,7 +494,7 @@ function clientKey(c) {     // words of the client name without company suffixes
   return n.replace(/\s/g, '').length >= 3 && !/^[\d ]+$/.test(n) ? n : '';
 }
 function monthRank(m) { const k = String(m || '').toLowerCase().slice(0, 3); return CFG.MONTH_RANK[k] || 0; }
-function siteKey(s) { const k = String(s || '').toLowerCase().replace(/\s+/g, ' ').trim(); return CFG.SITE_ALIASES[k] || k; }
+function siteKey(s) { const k = String(s || '').toLowerCase().replace(/[_\s]+/g, ' ').trim(); return CFG.SITE_ALIASES[k] || k; }   // "CCU_Large DC" = "CCU Large DC"
 function driveId(u) { const m = String(u || '').match(/[?&]id=([\w-]{10,})|\/d\/([\w-]{10,})/); return m ? (m[1] || m[2]) : ''; }
 function num(v) { const n = parseFloat(v); return isFinite(n) ? n : null; }
 
@@ -960,6 +961,7 @@ async function runMatch(orph, salv, combo, progress, opts) {
         const exact = r.s >= CFG.EXACT;
         if (!same) { // cross-site: near-exact + description evidence + age > 20
           if (r.img ? (r.s < 0.92 || r.specHit < 3) : (r.s < CFG.CROSS_MIN || !o.dt.length || r.specHit < 2 || (o.brand && !r.b))) continue;
+          if (!r.img && r.s < 0.90 && !(o.brand && r.b)) continue;   // 80–89% cross-site only when the brand matches; unbranded orphans need 90%+
           if (!(e.age > CFG.CROSS_AGE)) { bestCrossLow = 'Cross-site candidate ageing ≤ 20 days'; continue; }
         }
         // single-product AWBs always come before combo AWBs:
@@ -1632,7 +1634,7 @@ async function runMatch(orph, salv, combo, progress, opts) {
       ['Run summary', ''], ['Orphan rows', st.orphans], ['Excluded (no brand/description or packaging only)', st.excluded], ['Matched', st.matched],
       ['Salvaging AWBs scanned', st.salvaging], ['Combo AWBs in COMBO BASE', st.comboAwbs], ['FLOOR / LOSS source', st.floorRule],
       ['Sheets used', 'Orphan: ' + st.sheets.orphan + ' · Salvaging: ' + st.sheets.salvaging + ' · Combo: ' + st.sheets.combo],
-      ['Thresholds', 'Exact ≥ 85%, Similar 70–84%, Cross-site ≥ 90% and ageing > 20 days'],
+      ['Thresholds', 'Exact ≥ 85%, Similar 70–84%, Cross-site ≥ 80% with brand match (≥ 90% without brand) and salvaging ageing > 20 days'],
       ['Brand → tag → back image text', st.imageText && st.imageText.enabled ? st.imageText.scope + ' unclear orphans; ' + st.imageText.matched + ' matched from image text (readable: brand ' + st.imageText.read.brand + ', tag ' + st.imageText.read.tag + ', back ' + st.imageText.read.back + ')' : 'Off'],
       ['Image volume check', st.imageCheck && st.imageCheck.enabled ? 'On: volume read for ' + st.imageCheck.read + ' of ' + st.imageCheck.rows + ' rows; ' + st.imageCheck.changed + ' matches changed' : 'Off'],
       ['Volume unverified (marked Similar)', (st.imageCheck && st.imageCheck.unverified) || 0],
