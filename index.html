@@ -235,13 +235,13 @@ footer{margin-top:28px;padding-top:12px;border-top:1px solid var(--line);color:v
         <ol class="ladder">
           <li>Same site · FILE TYPE = FLOOR</li>
           <li>Same site · FILE TYPE = LOSS</li>
-          <li>Cross-site · AWB not starting with R · FLOOR, then LOSS (near-exact, salvaging ageing &gt; 20 days, orphan ageing 15+ days)</li>
+          <li>Cross-site · AWB not starting with R · FLOOR, then LOSS (near-exact, salvaging ageing &gt; 20 days, orphan ageing 16+ days)</li>
           <li>Cross-site · AWB starting with R · FLOOR, then LOSS (same conditions)</li>
         </ol>
         <h3>Ageing rules</h3>
         <ul class="guards">
-          <li>Orphan ageing below 15 days: same-site FLOOR only, and salvaging max_ageing at least 1 day more than the orphan's ageing.</li>
-          <li>Orphan ageing 15 days or more: FLOOR first, then LOSS (same site, then cross-site); salvaging max_ageing must not be less than the orphan's ageing.</li>
+          <li>Orphan ageing 0–15 days: same-site FLOOR only, and salvaging max_ageing at least 1 day more than the orphan's ageing. Orphans aged 0–2 days match single-product AWBs only; 3–15 days can also take a same-site FLOOR combo.</li>
+          <li>Orphan ageing 16 days or more: same-site FLOOR, same-site LOSS, then cross-site FLOOR and LOSS; salvaging max_ageing must not be less than the orphan's ageing.</li>
         </ul>
         <h3>Match rules (70% minimum)</h3>
         <ol class="ladder">
@@ -252,11 +252,10 @@ footer{margin-top:28px;padding-top:12px;border-top:1px solid var(--line);color:v
         </ol>
         <h3>Within each level</h3>
         <ul class="guards">
-          <li>Single-AWB matches come before Combo Base items (each combo item goes to a different orphan). For orphans aged 15+, a single-product AWB at another site comes before a combo AWB at the same site; orphans under 15 can still match a same-site FLOOR combo.</li>
+          <li>Single-product AWBs always come first, at every level (same-site FLOOR, same-site LOSS, cross-site FLOOR, cross-site LOSS). A combo AWB is used only when an orphan has no single-product match, and each combo item goes to a different orphan.</li>
           <li>A combo AWB is matched only when at least 40% of its items are found among the orphans; otherwise those orphans take their next candidate.</li>
           <li>All items of one combo AWB must come from orphans at the same site; the site that covers the most items is kept.</li>
-          <li>Cross-site combo AWBs: non-R AWBs before R AWBs; within each, the AWB with the fewest combo items comes first, then the highest share of its items found among the orphans, then FLOOR before LOSS.</li>
-          <li>Same-site combo AWBs: FLOOR before LOSS; within each, the AWB with the fewest combo items comes first.</li>
+          <li>Combo AWBs: the combo with the most of its items found among the orphans comes first; then same-site FLOOR, same-site LOSS, cross-site (non-R FLOOR, non-R LOSS, R FLOOR, R LOSS); then the higher share of items found.</li>
           <li>Then the higher match score (Exact 85%+ before Similar 70–84%), then picked month Sep › Aug › Jul › Jun › May › Apr › Mar.</li>
         </ul>
       </div>
@@ -324,7 +323,8 @@ const CFG = {
   CROSS_MIN: 0.90,        // cross-site must be near-exact
   CROSS_AGE: 20,          // cross-site only for salvaging ageing > 20 days
   COMBO_MIN_SHARE: 0.4,   // a combo AWB is matched only when at least this share of its items is found among the orphans
-  SHORT_ORPHAN_AGE: 15,   // orphan ageing below this: same-site FLOOR only, salvaging ageing ≥ orphan ageing + SHORT_MIN_GAP
+  SHORT_ORPHAN_AGE: 15,   // orphan ageing up to and including this: same-site FLOOR only, salvaging ageing ≥ orphan ageing + SHORT_MIN_GAP
+  COMBO_MIN_ORPHAN_AGE: 3, // combo AWBs are matched only for orphans aged this many days or more
   SHORT_MIN_GAP: 1,
   LONG_MIN_GAP: 0,        // orphan ageing 15 or more: FLOOR then LOSS, salvaging ageing ≥ orphan ageing + LONG_MIN_GAP
   TOPK: 6,                // candidates kept per orphan
@@ -892,6 +892,7 @@ async function runMatch(orph, salv, combo, progress, opts) {
   function bsearch(A, v) { let lo = 0, hi = A.length - 1; while (lo <= hi) { const m = (lo + hi) >> 1; if (A[m] === v) return true; if (A[m] < v) lo = m + 1; else hi = m - 1; } return false; }
 
   /* ---- generate candidate pairs ---- */
+  const comboFound = new Map();   // combo AWB → number of its items that have at least one orphan candidate (filled before assignment)
   const comboShare = new Map();   // combo AWB → share of its items that have at least one orphan candidate (filled before assignment)
   const pairs = []; const unmatchedReason = new Array(O.length).fill('');
   const excluded = new Array(O.length).fill(false);
@@ -901,7 +902,8 @@ async function runMatch(orph, salv, combo, progress, opts) {
     if (!o.itoks.length && !o.brand && !o.descRaw) { excluded[k] = true; unmatchedReason[k] = 'Excluded — no brand and no product description'; continue; }
     if (!o.itoks.length && !o.brand && !o.specific.length) { excluded[k] = true; unmatchedReason[k] = 'Excluded — description too generic to identify (e.g. packaging only) and no brand'; continue; }
     const found = []; let bestReject = null, bestCrossLow = null, ageBlocked = null;
-    const short = o.age != null && o.age < CFG.SHORT_ORPHAN_AGE;      // under 15: same-site FLOOR only, salvaging ageing ≥ orphan + 1
+    const short = o.age != null && o.age <= CFG.SHORT_ORPHAN_AGE;     // 0–15 days: same-site FLOOR only, salvaging ageing ≥ orphan + 1
+    const noComboAge = o.age != null && o.age < CFG.COMBO_MIN_ORPHAN_AGE; // 0–2 days: single-product AWBs only
     const noCross = short;
     const scopes = [];
     if (salvSites.has(o.site)) scopes.push('site');
@@ -915,8 +917,9 @@ async function runMatch(orph, salv, combo, progress, opts) {
         // ageing rules
         let why = '';
         if (short) {
-          if (!(same && e.ptype === 'FLOOR')) why = 'it is ' + (same ? 'same-site LOSS' : 'cross-site') + '; orphans under ' + CFG.SHORT_ORPHAN_AGE + ' days match same-site FLOOR only';
-          else if (e.age == null || e.age < o.age + CFG.SHORT_MIN_GAP) why = 'salvaging ageing ' + (e.age == null ? 'unknown' : e.age) + ' vs orphan ' + o.age + ' (orphans under ' + CFG.SHORT_ORPHAN_AGE + ' days need salvaging ageing of at least ' + (o.age + CFG.SHORT_MIN_GAP) + ')';
+          if (!(same && e.ptype === 'FLOOR')) why = 'it is ' + (same ? 'same-site LOSS' : 'cross-site') + '; orphans aged up to ' + CFG.SHORT_ORPHAN_AGE + ' days match same-site FLOOR only';
+          else if (e.isCombo && noComboAge) why = 'it is a combo AWB; orphans aged under ' + CFG.COMBO_MIN_ORPHAN_AGE + ' days match single-product AWBs only';
+          else if (e.age == null || e.age < o.age + CFG.SHORT_MIN_GAP) why = 'salvaging ageing ' + (e.age == null ? 'unknown' : e.age) + ' vs orphan ' + o.age + ' (orphans aged up to ' + CFG.SHORT_ORPHAN_AGE + ' days need salvaging ageing of at least ' + (o.age + CFG.SHORT_MIN_GAP) + ')';
         } else if (o.age != null && e.age != null && e.age < o.age + CFG.LONG_MIN_GAP)
           why = 'salvaging ageing ' + e.age + ' is less than orphan ageing ' + o.age;
         let r = bestScore(o, e);
@@ -932,17 +935,15 @@ async function runMatch(orph, salv, combo, progress, opts) {
           if (r.img ? (r.s < 0.92 || r.specHit < 3) : (r.s < CFG.CROSS_MIN || !o.dt.length || r.specHit < 2 || (o.brand && !r.b))) continue;
           if (!(e.age > CFG.CROSS_AGE)) { bestCrossLow = 'Cross-site candidate ageing ≤ 20 days'; continue; }
         }
-        // priority: same site (FLOOR, LOSS) → cross site, AWBs not starting with R first (FLOOR, LOSS), then R AWBs (FLOOR, LOSS).
-        // For orphans aged 15+, a single-product AWB (same site or cross site) comes before any combo AWB;
-        // orphans under 15 match same-site FLOOR only, so their same-site combo AWBs stay in the first level (after single AWBs).
+        // single-product AWBs always come before combo AWBs:
+        //   singles  → 1 same-site FLOOR, 2 same-site LOSS, 3/4 cross-site non-R FLOOR/LOSS, 5/6 cross-site R FLOOR/LOSS
+        //   combos   → 7: the combo with the most items found among the orphans first, then the same site/pendency ladder (see cmp)
+        // (orphans aged 0–15 only ever reach same-site FLOOR; 0–2 days never reach combos)
         const fl = e.ptype === 'FLOOR', rAwb = /^R/i.test(e.awb);
-        let tier;
-        if (!e.isCombo) tier = same ? (fl ? 1 : 2) : (rAwb ? (fl ? 5 : 6) : (fl ? 3 : 4));
-        // cross-site combos: non-R AWBs (tier 9) before R AWBs (tier 11); inside each, the combo with the highest
-        // share of its items found among the orphans comes first, then FLOOR before LOSS (see cmp)
-        else tier = same ? (short ? (fl ? 1 : 2) : (fl ? 7 : 8)) : (rAwb ? 11 : 9);
+        const ladder = same ? (fl ? 1 : 2) : (rAwb ? (fl ? 5 : 6) : (fl ? 3 : 4));
+        const tier = e.isCombo ? 7 : ladder;
         const ageOk = e.ptype === 'FLOOR' ? (o.age != null && e.age != null && o.age < e.age) : true;
-        found.push({ o: k, e: i, s: r.s, tier, ageOk, same, basis: r.basis, rule: r.img ? 'Image text' : r.rule, img: !!r.img, gap: (o.age != null && e.age != null) ? Math.abs(e.age - o.age) : 999 });
+        found.push({ o: k, e: i, s: r.s, tier, ladder, ageOk, same, basis: r.basis, rule: r.img ? 'Image text' : r.rule, img: !!r.img, gap: (o.age != null && e.age != null) ? Math.abs(e.age - o.age) : 999 });
       }
     }
     found.sort(cmp);
@@ -950,22 +951,22 @@ async function runMatch(orph, salv, combo, progress, opts) {
     for (const f of found) { const key = pool[f.e].useKey; if (seen.has(key)) continue; seen.add(key); pairs.push(f); if (seen.size >= CFG.TOPK) break; }
     if (!found.length) unmatchedReason[k] = ageBlocked
       ? 'Ageing rule: best candidate (' + Math.round(ageBlocked.s * 100) + '%, AWB ' + ageBlocked.e.awb + ') not allowed: ' + ageBlocked.why
-      : bestReject ? 'No valid match — best candidate (' + Math.round(bestReject.s * 100) + '%) rejected: ' + bestReject.why : bestCrossLow || (noCross ? 'No candidate at or above 70% at its own site (orphans under ' + CFG.SHORT_ORPHAN_AGE + ' days match same-site FLOOR only)' : 'No candidate at or above 70% in salvaging or combo base');
+      : bestReject ? 'No valid match — best candidate (' + Math.round(bestReject.s * 100) + '%) rejected: ' + bestReject.why : bestCrossLow || (noCross ? 'No candidate at or above 70% at its own site (orphans aged up to ' + CFG.SHORT_ORPHAN_AGE + ' days match same-site FLOOR only)' : 'No candidate at or above 70% in salvaging or combo base');
   }
   function cmp(a, b) {
-    if (a.tier === b.tier && (a.tier === 9 || a.tier === 11)) {
-      // cross-site combos (non-R and R already split by tier): fewest combo items first, then highest share found, then FLOOR
+    if (a.tier === 7 && b.tier === 7) {
+      // combos: most items found among the orphans first, then same-site FLOOR → same-site LOSS → cross-site
+      // (non-R FLOOR, non-R LOSS, R FLOOR, R LOSS), then the higher share of items found
       const ea = pool[a.e], eb = pool[b.e];
-      if (ea.compCount !== eb.compCount) return ea.compCount - eb.compCount;
+      const n = (comboFound.get(eb.awb) || 0) - (comboFound.get(ea.awb) || 0);
+      if (n) return n;
+      if (a.ladder !== b.ladder) return a.ladder - b.ladder;
       const d = (comboShare.get(eb.awb) || 0) - (comboShare.get(ea.awb) || 0);
       if (d) return d;
-      if (ea.ptype !== eb.ptype) return ea.ptype === 'FLOOR' ? -1 : 1;
     }
-    // within a tier: single-AWB matches before combo items; between two combo AWBs (same site, FLOOR/LOSS already split by tier)
-    // the one with fewest combo items first; then FLOOR ageing fit, score, month, ageing gap
+    // then FLOOR ageing fit, score, month, ageing gap
     const ca = pool[a.e], cb = pool[b.e];
-    return a.tier - b.tier || (ca.isCombo - cb.isCombo) || (ca.isCombo && cb.isCombo ? ca.compCount - cb.compCount : 0) ||
-      (b.ageOk - a.ageOk) || (b.s - a.s) || (cb.mrank - ca.mrank) || (a.gap - b.gap);
+    return a.tier - b.tier || (b.ageOk - a.ageOk) || (b.s - a.s) || (cb.mrank - ca.mrank) || (a.gap - b.gap);
   }
 
   /* ---- one-to-one greedy assignment ---- */
@@ -998,7 +999,7 @@ async function runMatch(orph, salv, combo, progress, opts) {
   {
     const items = new Map();
     for (const p of pairs) { const e = pool[p.e]; if (!e.isCombo) continue; let s = items.get(e.awb); if (!s) items.set(e.awb, s = { idx: new Set(), n: e.compCount }); s.idx.add(e.compIdx); }
-    for (const [awb, s] of items) comboShare.set(awb, s.idx.size / s.n);
+    for (const [awb, s] of items) { comboShare.set(awb, s.idx.size / s.n); comboFound.set(awb, s.idx.size); }
   }
   pairs.sort(cmp);
   // a combo AWB is matched only when at least 40% of its items are found among the orphans;
@@ -1608,7 +1609,7 @@ async function runMatch(orph, salv, combo, progress, opts) {
       ['Volume unverified (marked Similar)', (st.imageCheck && st.imageCheck.unverified) || 0],
       ['Match rules', '1 Brand+Desc→Product/category · 2 Entered Brand+Desc→Product/category · 3 Brand+Desc→Client+desc · 4 Entered Brand+Desc→Client+desc · 70% minimum'],
       ['Client name column', st.clientColumn || 'Not found (rules 3–4 skipped)'],
-      ['Ageing rules', 'Orphan ageing under ' + st.shortAge + ' days: same-site FLOOR only, salvaging ageing ≥ orphan ageing + ' + st.shortGap + '; ' + st.shortAge + '+ days: FLOOR then LOSS, salvaging ageing ≥ orphan ageing'],
+      ['Ageing rules', 'Orphan ageing 0–' + st.shortAge + ' days: same-site FLOOR only, salvaging ageing ≥ orphan ageing + ' + st.shortGap + ' (combos from 3 days); ' + (st.shortAge + 1) + '+ days: FLOOR then LOSS, same site then cross-site, salvaging ageing ≥ orphan ageing'],
       ['AGEING column', 'Salvaging max_ageing'], ['Age column', 'Salvaging ageing − Orphan ageing (days)']]), 'Run Summary');
     const out = XLSX.write(wb, { bookType: 'xlsx', type: 'array', compression: true });
     save('Orphan_Salvaging_Matches_' + stamp() + '.xlsx', new Blob([out], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }));
