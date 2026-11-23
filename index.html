@@ -254,9 +254,9 @@ footer{margin-top:28px;padding-top:12px;border-top:1px solid var(--line);color:v
         <ul class="guards">
           <li>Single-product AWBs always come first, at every level (same-site FLOOR, same-site LOSS, cross-site FLOOR, cross-site LOSS). A combo AWB is used only when an orphan has no single-product match, and each combo item goes to a different orphan.</li>
           <li>A pack written in the salvaging description is also a combo: "Pack of 2", "Set of 6", "2 Packs", "500g X 2", "2x 50 ml" become 2–12 identical items, and a list like "Roll On X 1, Body Lotion X 1, Body Wash X 2" is split into its products. Packs of more than 12 stay one item. Mobile phones are never packs ("Redmi X2" is a model name).</li>
-          <li>A combo AWB is matched only when at least 40% of its items are found among the orphans; otherwise those orphans take their next candidate.</li>
+          <li>Combo AWBs have no minimum share: a combo is matched even when only some of its items are found, and COMBO REMARKS shows how many (for example "partial (1 of 8 items) — manual review").</li>
           <li>All items of one combo AWB must come from orphans at the same site; the site that covers the most items is kept.</li>
-          <li>Combo AWBs: the combo with the most of its items found among the orphans comes first; then same-site FLOOR, same-site LOSS, cross-site (non-R FLOOR, non-R LOSS, R FLOOR, R LOSS); then the higher share of items found.</li>
+          <li>Combo AWBs: the highest share of items found among the orphans comes first (100%, then 90%, 80%…); then the combo with more items found; then same-site FLOOR, same-site LOSS, cross-site (non-R FLOOR, non-R LOSS, R FLOOR, R LOSS).</li>
           <li>Then the higher match score (Exact 85%+ before Similar 70–84%), then picked month Sep › Aug › Jul › Jun › May › Apr › Mar.</li>
         </ul>
       </div>
@@ -323,7 +323,7 @@ const CFG = {
   MIN: 0.70,              // reference bar — nothing below is reported as a match
   CROSS_MIN: 0.90,        // cross-site must be near-exact
   CROSS_AGE: 20,          // cross-site only for salvaging ageing > 20 days
-  COMBO_MIN_SHARE: 0.4,   // a combo AWB is matched only when at least this share of its items is found among the orphans
+  COMBO_MIN_SHARE: 0,     // no minimum: a combo is matched whatever share of its items is found (higher shares are matched first)
   SHORT_ORPHAN_AGE: 15,   // orphan ageing up to and including this: same-site FLOOR only, salvaging ageing ≥ orphan ageing + SHORT_MIN_GAP
   COMBO_MIN_ORPHAN_AGE: 3, // combo AWBs are matched only for orphans aged this many days or more
   SHORT_MIN_GAP: 1,
@@ -982,14 +982,14 @@ async function runMatch(orph, salv, combo, progress, opts) {
   }
   function cmp(a, b) {
     if (a.tier === 7 && b.tier === 7) {
-      // combos: most items found among the orphans first, then same-site FLOOR → same-site LOSS → cross-site
-      // (non-R FLOOR, non-R LOSS, R FLOOR, R LOSS), then the higher share of items found
+      // combos: highest share of items found among the orphans first (100%, 90%, 80%…), then most items found,
+      // then same-site FLOOR → same-site LOSS → cross-site (non-R FLOOR, non-R LOSS, R FLOOR, R LOSS)
       const ea = pool[a.e], eb = pool[b.e];
+      const d = (comboShare.get(eb.awb) || 0) - (comboShare.get(ea.awb) || 0);
+      if (d) return d;
       const n = (comboFound.get(eb.awb) || 0) - (comboFound.get(ea.awb) || 0);
       if (n) return n;
       if (a.ladder !== b.ladder) return a.ladder - b.ladder;
-      const d = (comboShare.get(eb.awb) || 0) - (comboShare.get(ea.awb) || 0);
-      if (d) return d;
     }
     // then FLOOR ageing fit, score, month, ageing gap
     const ca = pool[a.e], cb = pool[b.e];
