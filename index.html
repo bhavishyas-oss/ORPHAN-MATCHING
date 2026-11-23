@@ -253,6 +253,7 @@ footer{margin-top:28px;padding-top:12px;border-top:1px solid var(--line);color:v
         <h3>Within each level</h3>
         <ul class="guards">
           <li>Single-product AWBs always come first, at every level (same-site FLOOR, same-site LOSS, cross-site FLOOR, cross-site LOSS). A combo AWB is used only when an orphan has no single-product match, and each combo item goes to a different orphan.</li>
+          <li>A pack written in the salvaging description is also a combo: "Pack of 2", "Set of 6", "2 Packs", "500g X 2", "2x 50 ml" become 2–12 identical items, and a list like "Roll On X 1, Body Lotion X 1, Body Wash X 2" is split into its products. Packs of more than 12 stay one item. Mobile phones are never packs ("Redmi X2" is a model name).</li>
           <li>A combo AWB is matched only when at least 40% of its items are found among the orphans; otherwise those orphans take their next candidate.</li>
           <li>All items of one combo AWB must come from orphans at the same site; the site that covers the most items is kept.</li>
           <li>Combo AWBs: the combo with the most of its items found among the orphans comes first; then same-site FLOOR, same-site LOSS, cross-site (non-R FLOOR, non-R LOSS, R FLOOR, R LOSS); then the higher share of items found.</li>
@@ -529,6 +530,26 @@ async function runMatch(orph, salv, combo, progress, opts) {
   }
   const pool = [];
   function catText(v) { const c = String(v == null ? '' : v).replace(/_/g, ' ').trim(); return /^(|0|-|na|general|default|others?|misc|\d+)$/i.test(c) ? '' : c; }
+  // items of a pack written in the description; null when it is a single product
+  //  - several different products with counts ("Roll On X 1, Body Lotion X 1, Body Wash 250ml X 2") → one item per unit of each product
+  //  - one product in a pack ("Pack of 2", "Set of 6", "2 Packs", "500g X 2", "2x 50 ml") → N identical items (2–12; bigger packs stay one item)
+  function packItems(raw) {
+    const desc = String(raw == null ? '' : raw);
+    // mobile phones never come in packs: "Redmi X2" / "Galaxy X 2" is a model name, not a count
+    if (/\b(mobile|phone|smartphone|5g|4g|lte|dual\s*sim|\d+\s*gb|ram|rom)\b/i.test(desc)) return null;
+    const segs = desc.split(/\s*,\s*/).filter(Boolean);
+    const cnt = seg => { const m = seg.match(/[a-z)]\s*[x×]\s*(\d{1,2})\s*$/i); return m ? +m[1] : 0; };
+    if (segs.length >= 2 && segs.filter(cnt).length >= 2) {
+      const out = [];
+      for (const sg of segs) { const n = cnt(sg) || 1, d = sg.replace(/\s*[x×]\s*\d{1,2}\s*$/i, ''); for (let i = 0; i < Math.min(n, 12); i++) out.push(d); }
+      if (out.length >= 2) { out.mixed = true; return out; }
+    }
+    const pats = [/\b(?:pack|set|combo)\s*of\s*(\d{1,3})\b/i, /\b(\d{1,2})\s*packs\b/i,
+      /\d+(?:\.\d+)?\s*(?:ml|g|gm|gms|kg|l|ltr)\s*[x×]\s*(\d{1,2})\b/i, /\b(\d{1,2})\s*[x×]\s*\d+(?:\.\d+)?\s*(?:ml|g|gm|gms|kg|l|ltr)\b/i,
+      /[a-z)]\s+[x×]\s*(\d{1,2})\b(?!\s*(?:cm|mm|inch|in|ft|m)\b)/i];
+    for (const re of pats) { const m = desc.match(re); if (m) { const n = +m[1]; if (n >= 2 && n <= 12) return Array(n).fill(desc); if (n > 12) return null; } }
+    return null;
+  }
   function addEntry(base, descRaw, isCombo, compIdx, compCount, pcatRaw) {
     const desc = String(descRaw == null ? '' : descRaw);
     const cat = catText(pcatRaw !== undefined ? pcatRaw : (sc.pcat ? base[sc.pcat] : ''));
@@ -547,11 +568,17 @@ async function runMatch(orph, salv, combo, progress, opts) {
       bundle: /\b(pack of [2-9]|pack of \d{2}|combo|set of [2-9]|gift (pack|set|box)|kit)\b|\bx\s*[2-9]\b/i.test(desc)
     });
   }
+  let packAwbs = 0;
   for (const [awb, r] of salvByAwb) {
     if (comboGroups.has(awb)) {
       const g = comboGroups.get(awb);
       g.forEach((c, k) => addEntry(r, c[cc.desc], true, k, g.length, cc.pcat && catText(c[cc.pcat]) ? c[cc.pcat] : undefined));
-    } else addEntry(r, r[sc.desc], false, 0, 1);
+    } else {
+      // a pack written inside the description ("Pack of 2", "Set of 6", "500g X 2", "Body Wash X 2, Lotion X 1") is a combo too
+      const items = packItems(r[sc.desc]);
+      if (items) { const n0 = pool.length; items.forEach((d, k) => addEntry(r, d, true, k, items.length)); for (let i = n0; i < pool.length; i++) pool[i].pack = items.mixed ? 'mixed' : 'pack'; packAwbs++; }
+      else addEntry(r, r[sc.desc], false, 0, 1);
+    }
   }
   // combo AWBs not present in salvaging base: keep with blank site
   for (const [awb, g] of comboGroups) if (!salvByAwb.has(awb)) {
@@ -1061,6 +1088,7 @@ async function runMatch(orph, salv, combo, progress, opts) {
       const n = comboHits.get(e.awb) || 0;
       comboRemark = n >= 2 ? (n === e.compCount ? 'COMBO — all ' + n + ' of ' + e.compCount + ' items matched' : 'COMBO — ' + n + ' of ' + e.compCount + ' items matched')
         : 'COMBO — partial (1 of ' + e.compCount + ' items) — manual review';
+      if (e.pack) comboRemark += e.pack === 'mixed' ? ' (several products in one description)' : ' (pack of ' + e.compCount + ' in description)';
     }
     results.push({
       'BARCODE': oc.barcode ? (r[oc.barcode] == null ? '' : r[oc.barcode]) : '',
@@ -1091,6 +1119,7 @@ async function runMatch(orph, salv, combo, progress, opts) {
     results, notMatched,
     stats: { orphans: O.length, salvaging: salvByAwb.size, comboAwbs: comboGroups.size, matched: results.length, excluded: excluded.filter(Boolean).length,
       clientColumn: sc.client || '', shortAge: CFG.SHORT_ORPHAN_AGE, shortGap: CFG.SHORT_MIN_GAP,
+      packAwbs,
       floorRule: sc.ptype ? sc.ptype + ' column (FLOOR / LOSS)' : 'derived from Loss Bucket Sub Tagging ("Floor…" = FLOOR, else LOSS)',
       unmappedSites: [...new Set(O.filter(o => !salvSites.has(o.site)).map(o => o.siteRaw))] }
   };
