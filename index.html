@@ -267,6 +267,7 @@ footer{margin-top:28px;padding-top:12px;border-top:1px solid var(--line);color:v
           <li>Brand + product type + key ingredient are the core of a match ("Vitamin C+E … Moisturizer" = "Vitamin C+E Moisturizer … 60 ml"); marketing words like Super Bright or Luxury count for little. 70% is the floor, 85%+ is Exact, cross-site needs 80%+ with the brand matching (90%+ without a brand).</li>
           <li>The listing must name the orphan's product type, so a shampoo never matches a hair spray, a face wash never matches a soap, and a protein shake never matches oats. The type is read from the orphan description before "with / for / in". A named flavour or variant must also be in the listing (Strawberry ≠ Watermelon), and so must the body area (a hair serum never matches a face serum). Words that are part of the brand name ("The Plant Fix") don't count as product detail.</li>
           <li>Brands are recognised with a one-letter typo in either the Brand or Entered Brand column ("dot&amp;kay" = Dot &amp; Key).</li>
+          <li>Product words in a brand column ("Mustard oil", "Face wash", "Shampoo") are not treated as a brand. When the Brand column names a real brand and the salvaging listing opens with a different brand, the pair is rejected (JIVO ≠ "Sarfa … Mustard Oil"), even if Entered Brand or the description match. Accented letters count as plain ones (AQUÉRIA = Aqueria, L'ORÉAL = L'Oreal).</li>
           <li>Category must agree with what the salvaging description is (Footwear brand ≠ jeans), unless the orphan's own description clearly names the product (a face wash tagged "Footwear" is treated as a face wash).</li>
           <li>Run-together salvaging text is split into words ("SuperBrightGelMoisturizer"), and "+" is not treated as a word.</li>
           <li>Volume / weight / pack count must match when both sides state it (200 ml ≠ 400 ml).</li>
@@ -314,6 +315,7 @@ footer{margin-top:28px;padding-top:12px;border-top:1px solid var(--line);color:v
 </div></div>
 
 <script id="engine">
+
 /* ============================================================
    SHADOWFAX ORPHAN ↔ SALVAGING MATCH ENGINE
    Pure JS — runs inside a Web Worker (also testable in Node).
@@ -377,7 +379,7 @@ const GENERIC = new Set(('plastic bag bags box boxes cardboard carton container 
 const JUNK_VAL = /^(|-|na|n\/a|nan|nil|nill|null|none|no|unknown|not visible|not clear|not specified|not available|no brand|no brand name|detected brand name|brand|generic|0|unbranded|not mentioned)$/;
 
 function norm(s) {
-  return String(s == null ? '' : s)
+  return String(s == null ? '' : s).normalize('NFD').replace(/[\u0300-\u036f]/g, '')   // "AQUÉRIA" → "AQUERIA", "L'ORÉAL" → "L'OREAL"
     .replace(/([a-z])([A-Z])/g, '$1 $2').replace(/([A-Z])([A-Z][a-z])/g, '$1 $2')   // "SuperBrightGel" → "Super Bright Gel"
     .toLowerCase()
     .replace(/&/g, ' and ').replace(/\+/g, ' ')
@@ -634,16 +636,31 @@ async function runMatch(orph, salv, combo, progress, opts) {
     clientMatchCache.set(bc, out); return out;
   }
 
+  const FORM_WORDS = new Set('gel cream lotion foam liquid spray stick powder face skin hair body wash daily care glow skincare formula'.split(' '));
+  const MARKETING = new Set('super bright brightening luxury luxurious daily ultra advanced advance intense deep natural pure fresh perfect extra total active smart instant pro plus max mini new classic signature original gentle mild soft smooth radiant glowing glow healthy happy simply simple everyday weightless lightweight light long lasting stay matte unisex'.split(' '));
+  const FLAVOUR = new Set('strawberry watermelon mango orange lemon blueberry cherry grape peach apple pomegranate papaya banana avocado cucumber coconut rose lavender vanilla chocolate mint jasmine sandalwood lime grapefruit berry kiwi pineapple guava litchi lychee melon honeydew'.split(' '));
+  const INGREDIENT = new Set('vitamin gel oil butter honey milk almond rose aloe tea coffee charcoal turmeric neem saffron rice coconut lemon orange strawberry mango shea collagen protein seed nut'.split(' '));
+  const NOT_TYPE = new Set('glass spf lip nail hair beard multivitamin vitamin pad peel peeling wax polish compact protein dry fruit seed nut powder top short boot iron fan block frame cover case stand holder'.split(' '));
+  const EXTRA_TYPE = new Set('shake oat muesli cereal granola cleaner detergent conditioner mist'.split(' '));
+  // product words (oil, shampoo, face wash…) written in a brand column are not a brand
+  const isProductWord = t => GENERIC.has(t) || !!FAM[t] || INGREDIENT.has(t) || FORM_WORDS.has(t) || FLAVOUR.has(t) || EXTRA_TYPE.has(t) || MARKETING.has(t) || /^\d/.test(t);
+  function productWordsOnly(bt, descRaw) {
+    if (!bt.length) return true;
+    if (bt.every(isProductWord)) return true;
+    // "Mustard oil" with description "Cold pressed kachi ghani mustard oil": product words taken from the description, not its opening brand words
+    const dt = tokens(descRaw), lead = new Set(dt.slice(0, 2)), all = new Set(dt);
+    return bt.some(isProductWord) && bt.every(t => all.has(t) && !lead.has(t));
+  }
   /* ---- prepare orphans ---- */
   const O = orph.map((r, idx) => {
     const brandRaw = r[oc.brand], entRaw = oc.entered ? r[oc.entered] : '';
-    let brand = cleanBrand(brandRaw), brandSrc = brand ? 'Brand' : '';
+    let brand = cleanBrand(brandRaw), brandSrc = brand ? 'Brand' : '', entProduct = false;
     const descRaw = cleanDesc(r[oc.desc]);
     const UNCLEAR = /not\s*visible|not\s*clear|unidentified|unknown|detected brand name|no visible|unable|cannot|shadowfax|hadowfa/i;
     const unclearText = UNCLEAR.test(String(brandRaw || '')) || UNCLEAR.test(String(r[oc.desc] || ''));
     if (!brand && entRaw) { // rule 10: fall back to ENTERED BRAND
       const eb = cleanBrand(entRaw); const et = tokens(eb);
-      if (eb && et.length && !et.every(t => GENERIC.has(t) || FAM[t])) { brand = eb; brandSrc = 'Entered Brand'; }
+      if (eb && et.length && !productWordsOnly(et, descRaw)) { brand = eb; brandSrc = 'Entered Brand'; } else if (eb && et.length) entProduct = true;
     }
     let btoks = tokens(brand);
     const bdf = btoks.length ? Math.min(...btoks.map(t => df.get(t) || 0)) : 0;
@@ -660,7 +677,7 @@ async function runMatch(orph, salv, combo, progress, opts) {
     if (ofam.size) { const strong = [...ofam].filter(f => !allow || allow.has(f)); if (strong.length) allow = new Set(strong); }
     return {
       idx, r, site: siteKey(r[oc.site]), siteRaw: r[oc.site], age: num(r[oc.age]),
-      brand, brandSrc, btoks, weakBrand, bcompact: brand.replace(/\s/g, ''), descRaw, dt, specific,
+      brand, brandSrc, btoks, weakBrand, entProduct: entProduct && !brand, bcompact: brand.replace(/\s/g, ''), descRaw, dt, specific,
       ofam, imgQty: imageQty[idx] || '', q: quantities(descRaw + (imageQty[idx] ? ' ' + imageQty[idx] : '')), allow,
       keys: [...new Set([...btoks, ...dt])], unclearText,
       models: (String(descRaw).match(/(?<![\d.])\d{2,4}(?![\d.]|\s*(?:%|ml|l\b|ltr|g\b|gm|gms|kg|mg|pcs|pc\b|x\b|cm|mm|inch|w\b|mah|gb|tb))/gi) || []), cat: r[oc.category],
@@ -701,7 +718,7 @@ async function runMatch(orph, salv, combo, progress, opts) {
     o.variants = [o];
     const other = o.brandSrc === 'Brand' ? (oc.entered ? o.r[oc.entered] : '') : (o.brandSrc === 'Entered Brand' ? o.r[oc.brand] : '');
     const ob = cleanBrand(other), obt = tokens(ob);
-    if (ob && obt.length && !obt.every(t => GENERIC.has(t) || FAM[t]) && ob.replace(/\s/g, '') !== o.bcompact) {
+    if (ob && obt.length && !productWordsOnly(obt, o.descRaw) && ob.replace(/\s/g, '') !== o.bcompact) {
       const bdf = Math.min(...obt.map(t => df.get(t) || 0));
       const isClient = clientKeysFor(ob).length > 0;
       const src = o.brandSrc === 'Brand' ? 'Entered Brand' : 'Brand';
@@ -762,13 +779,7 @@ async function runMatch(orph, salv, combo, progress, opts) {
     const g = gate(o, e); if (g) return { s: 0, reject: g, rs: s };
     return { s, img: true, specHit: rare, b: 1, basis: 'Text read from ' + o.imgSrc + ' image' };
   }
-  const FORM_WORDS = new Set('gel cream lotion foam liquid spray stick powder face skin hair body wash daily care glow skincare formula'.split(' '));
-  const MARKETING = new Set('super bright brightening luxury luxurious daily ultra advanced advance intense deep natural pure fresh perfect extra total active smart instant pro plus max mini new classic signature original gentle mild soft smooth radiant glowing glow healthy happy simply simple everyday weightless lightweight light long lasting stay matte unisex'.split(' '));
-  const FLAVOUR = new Set('strawberry watermelon mango orange lemon blueberry cherry grape peach apple pomegranate papaya banana avocado cucumber coconut rose lavender vanilla chocolate mint jasmine sandalwood lime grapefruit berry kiwi pineapple guava litchi lychee melon honeydew'.split(' '));
-  const INGREDIENT = new Set('vitamin gel oil butter honey milk almond rose aloe tea coffee charcoal turmeric neem saffron rice coconut lemon orange strawberry mango shea collagen protein seed nut'.split(' '));
   // core of a match: the brand, the product type (moisturizer, face wash, serum…) and at least one key ingredient/variant word
-  const NOT_TYPE = new Set('glass spf lip nail hair beard multivitamin vitamin pad peel peeling wax polish compact protein dry fruit seed nut powder top short boot iron fan block frame cover case stand holder'.split(' '));
-  const EXTRA_TYPE = new Set('shake oat muesli cereal granola cleaner detergent conditioner mist'.split(' '));
   const isProductNoun = t => (EXTRA_TYPE.has(t) || (FAM[t] && !GENERIC.has(t) && !INGREDIENT.has(t) && !FORM_WORDS.has(t))) && !NOT_TYPE.has(t);
   const TYPE_SYN = { facewash: ['cleanser'], cleanser: ['facewash'], oat: ['muesli', 'cereal', 'granola'], deo: ['perfume', 'rollon'], perfume: ['deo', 'rollon', 'mist'], rollon: ['deo', 'perfume'], bodywash: ['shower'] };
   // product type = the last product noun before "with / for / in / infused", "|", "," or "("
@@ -846,7 +857,7 @@ async function runMatch(orph, salv, combo, progress, opts) {
       const early = new Set(e.toks.slice(0, 6));
       if (!o.specific.some(t => early.has(t))) s = Math.min(s, 0.6);
       else if (d.specHit >= 3) { /* full strength */ }
-      else if (d.specHit === 2) s = Math.min(s, 0.80);
+      else if (d.specHit === 2) s = Math.min(s, o.entProduct ? 0.6 : 0.80);   // Entered Brand held only product words ("Rose body lotion"): two words cannot identify it
       else s = Math.min(s, 0.6);   // a single generic noun with no brand cannot identify a shipment
     }
     if (o.modelRe && !o.modelRe.test(e.ntext)) { s *= 0.85; basis += '; model/number in orphan desc not found'; }
@@ -868,7 +879,20 @@ async function runMatch(orph, salv, combo, progress, opts) {
   }
   const RULE = { 1: 'Rule 1 · Brand + Description → Product name & category', 2: 'Rule 2 · Entered Brand + Description → Product name & category',
     3: 'Rule 3 · Brand + Description → Client name & description', 4: 'Rule 4 · Entered Brand + Description → Client name & description' };
+  // the Brand column names a real brand, the listing does not carry it and opens with another brand name (JIVO vs "Sarfa … Mustard Oil")
+  function otherBrand(o, e) {
+    if (o.brandSrc !== 'Brand' || !o.brand || o.weakBrand || (o.clKeys && o.clKeys.length) || brandHit(o, e)) return '';   // a client/marketplace name is not a product brand
+    // the Entered Brand carries the listing's brand (Brand "Blestaa Essentials" / Entered "Blestaaa") — unless the orphan description opens with the Brand column brand
+    const dl = tokens(o.descRaw).slice(0, Math.max(2, o.btoks.length));
+    const brandLeads = o.btoks.every(t => dl.includes(t));
+    if (!brandLeads && (o.variants || []).some(v => v !== o && brandHit(v, e) && v.btoks.length && e.toks.indexOf(v.btoks[0]) <= 1)) return '';
+    const own = new Set([...o.btoks, ...tokens(o.descRaw)]);
+    const t = e.toks.find(x => !/^\d/.test(x));
+    if (!t || own.has(t) || isProductWord(t) || (df.get(t) || 0) > 400) return '';   // a common word ("mid", "heavy") is not a brand name
+    return 'Different brand (orphan ' + o.brand.toUpperCase() + ' vs salvaging "' + t + '")';
+  }
   function bestScore(o, e) {
+    const ob = otherBrand(o, e);
     let best = null, rej = null;
     for (const v of o.variants) {
       for (const r of [score(v, e), scoreClient(v, e)]) {
@@ -880,6 +904,7 @@ async function runMatch(orph, salv, combo, progress, opts) {
         if (!best || r.s > best.s) best = r;
       }
     }
+    if (ob) return { s: 0, reject: ob, rs: Math.max(best ? best.s : 0, rej ? rej.rs : 0) };
     if (best && best.s >= CFG.MIN) return best;
     return rej && (!best || rej.rs > best.s) ? rej : (best || { s: 0 });
   }
